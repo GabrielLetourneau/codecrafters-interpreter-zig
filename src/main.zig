@@ -1,11 +1,13 @@
 const std = @import("std");
+const scan = @import("scan.zig");
 
 pub fn main() !void {
-    // You can use print statements as follows for debugging, they'll be visible when running tests.
-    std.debug.print("Logs from your program will appear here!\n", .{});
+    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
 
-    const args = try std.process.argsAlloc(std.heap.page_allocator);
-    defer std.process.argsFree(std.heap.page_allocator, args);
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
 
     if (args.len < 3) {
         std.debug.print("Usage: ./your_program.sh tokenize <filename>\n", .{});
@@ -20,13 +22,13 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    const file_contents = try std.fs.cwd().readFileAlloc(std.heap.page_allocator, filename, std.math.maxInt(usize));
-    defer std.heap.page_allocator.free(file_contents);
+    const file_contents = try std.fs.cwd().readFileAlloc(allocator, filename, std.math.maxInt(usize));
+    defer allocator.free(file_contents);
 
-    // Uncomment this block to pass the first stage
-    if (file_contents.len > 0) {
-        @panic("Scanner not implemented");
-    } else {
-        try std.io.getStdOut().writer().print("EOF  null\n", .{}); // Placeholder, remove this line when implementing the scanner
+    const tokens: []const scan.Token = try scan.scan(file_contents, allocator);
+
+    const out = std.io.getStdOut().writer();
+    for (tokens) |token| {
+        try out.print("{s}\n", .{token});
     }
 }
