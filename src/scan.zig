@@ -4,6 +4,8 @@ pub const TokenTag = enum {
     // Single-character tokens.
     left_paren,
     right_paren,
+    left_brace,
+    right_brace,
 
     // end of unit
     eof,
@@ -51,6 +53,8 @@ const Scanner = struct {
             switch (self.source[self.current]) {
                 '(' => try self.addEmptyToken(.left_paren),
                 ')' => try self.addEmptyToken(.right_paren),
+                '{' => try self.addEmptyToken(.left_brace),
+                '}' => try self.addEmptyToken(.right_brace),
                 else => return error.UnexpectedCharacter,
             }
         }
@@ -82,12 +86,13 @@ fn testScan(source: []const u8, output: []const u8) !void {
         try std.testing.expect(index < tokens.len);
         const token_string = try std.fmt.allocPrint(allocator, "{s}", .{tokens[index]});
         defer allocator.free(token_string);
+        std.debug.print("expected: {s}, actual: {s}\n", .{ expected_line, token_string });
         try std.testing.expectEqualStrings(expected_line, token_string);
         index += 1;
     }
 
     // Fails if we haven’t had all expected tokens.
-    try std.testing.expectEqual(tokens.len, index);
+    try std.testing.expectEqual(index, tokens.len);
 }
 
 test "scan single character tokens" {
@@ -96,6 +101,13 @@ test "scan single character tokens" {
         \\LEFT_PAREN ( null
         \\LEFT_PAREN ( null
         \\RIGHT_PAREN ) null
+        \\EOF  null
+    );
+    try testScan("{{}}",
+        \\LEFT_BRACE { null
+        \\LEFT_BRACE { null
+        \\RIGHT_BRACE } null
+        \\RIGHT_BRACE } null
         \\EOF  null
     );
 }
