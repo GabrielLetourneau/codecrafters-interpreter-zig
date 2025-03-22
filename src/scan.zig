@@ -47,9 +47,14 @@ const Scanner = struct {
     const Self = @This();
 
     fn scan(self: *Self) !void {
-        try self.addEmptyToken(.left_paren);
-        try self.addEmptyToken(.left_paren);
-        try self.addEmptyToken(.right_paren);
+        while (self.current < self.source.len) {
+            switch (self.source[self.current]) {
+                '(' => try self.addEmptyToken(.left_paren),
+                ')' => try self.addEmptyToken(.right_paren),
+                else => return error.UnexpectedCharacter,
+            }
+        }
+
         try self.tokens_list.append(.{ .tag = .eof, .lexeme = "", .literal = empty_literal });
     }
 
@@ -64,3 +69,33 @@ const Scanner = struct {
         try self.tokens_list.append(.{ .tag = tag, .lexeme = lexeme, .literal = literal });
     }
 };
+
+fn testScan(source: []const u8, output: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const tokens = try scan(source, allocator);
+    defer allocator.free(tokens);
+
+    var expected_lines = std.mem.splitScalar(u8, output, '\n');
+    var index: usize = 0;
+    while (expected_lines.next()) |expected_line| {
+        // We shouldn’t have more tokens than expected
+        try std.testing.expect(index < tokens.len);
+        const token_string = try std.fmt.allocPrint(allocator, "{s}", .{tokens[index]});
+        defer allocator.free(token_string);
+        try std.testing.expectEqualStrings(expected_line, token_string);
+        index += 1;
+    }
+
+    // Fails if we haven’t had all expected tokens.
+    try std.testing.expectEqual(tokens.len, index);
+}
+
+test "scan single character tokens" {
+    try testScan("", "EOF  null");
+    try testScan("(()",
+        \\LEFT_PAREN ( null
+        \\LEFT_PAREN ( null
+        \\RIGHT_PAREN ) null
+        \\EOF  null
+    );
+}
