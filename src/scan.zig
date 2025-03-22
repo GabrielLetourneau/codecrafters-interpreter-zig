@@ -6,6 +6,13 @@ pub const TokenTag = enum {
     right_paren,
     left_brace,
     right_brace,
+    comma,
+    dot,
+    minus,
+    plus,
+    semicolon,
+    slash,
+    star,
 
     // end of unit
     eof,
@@ -55,6 +62,12 @@ const Scanner = struct {
                 ')' => try self.addEmptyToken(.right_paren),
                 '{' => try self.addEmptyToken(.left_brace),
                 '}' => try self.addEmptyToken(.right_brace),
+                ',' => try self.addEmptyToken(.comma),
+                '.' => try self.addEmptyToken(.dot),
+                '-' => try self.addEmptyToken(.minus),
+                '+' => try self.addEmptyToken(.plus),
+                '/' => try self.addEmptyToken(.slash),
+                '*' => try self.addEmptyToken(.star),
                 else => return error.UnexpectedCharacter,
             }
         }
@@ -108,6 +121,18 @@ test "scan single character tokens" {
         \\LEFT_BRACE { null
         \\RIGHT_BRACE } null
         \\RIGHT_BRACE } null
+        \\EOF  null
+    );
+    try testScan("({*.,+*})",
+        \\LEFT_PAREN ( null
+        \\LEFT_BRACE { null
+        \\STAR * null
+        \\DOT . null
+        \\COMMA , null
+        \\PLUS + null
+        \\STAR * null
+        \\RIGHT_BRACE } null
+        \\RIGHT_PAREN ) null
         \\EOF  null
     );
 }
