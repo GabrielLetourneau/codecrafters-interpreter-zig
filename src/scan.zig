@@ -66,6 +66,7 @@ const Scanner = struct {
                 '.' => try self.addEmptyToken(.dot),
                 '-' => try self.addEmptyToken(.minus),
                 '+' => try self.addEmptyToken(.plus),
+                ';' => try self.addEmptyToken(.semicolon),
                 '/' => try self.addEmptyToken(.slash),
                 '*' => try self.addEmptyToken(.star),
                 else => return error.UnexpectedCharacter,
