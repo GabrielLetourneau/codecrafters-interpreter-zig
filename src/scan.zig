@@ -26,22 +26,20 @@ pub const TokenTag = enum {
 
     // Literals.
     string,
+    number,
 
     // end of unit
     eof,
 };
 
-pub const Literal = union {
-    empty: void,
-    string: []const u8,
-};
-
-const empty_literal: Literal = .{ .empty = {} };
-
 pub const Token = struct {
     tag: TokenTag,
     lexeme: []const u8,
-    literal: Literal,
+    literal: union {
+        empty: void,
+        string: []const u8,
+        number: f64,
+    },
 
     pub fn format(self: Token, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         for (@tagName(self.tag)) |char| {
@@ -50,6 +48,11 @@ pub const Token = struct {
         try writer.print(" {s} ", .{self.lexeme});
         switch (self.tag) {
             .string => try writer.writeAll(self.literal.string),
+            .number => {
+                const number = self.literal.number;
+                try writer.print("{d}", .{number});
+                if (number == @trunc(number)) try writer.writeAll(".0");
+            },
             else => try writer.writeAll("null"),
         }
     }
@@ -114,6 +117,7 @@ const Scanner = struct {
         while (self.current < self.source.len) {
             const char = self.source[self.current];
             self.current += 1;
+            defer self.start = self.current;
             switch (char) {
                 '(' => try self.addEmptyToken(.left_paren),
                 ')' => try self.addEmptyToken(.right_paren),
@@ -124,55 +128,26 @@ const Scanner = struct {
                 '-' => try self.addEmptyToken(.minus),
                 '+' => try self.addEmptyToken(.plus),
                 ';' => try self.addEmptyToken(.semicolon),
-                '/' => if (self.match('/')) {
-                    if (std.mem.indexOfScalarPos(u8, self.source, self.current, '\n')) |new_line_index| {
-                        self.line += 1;
-                        self.current = new_line_index + 1;
-                    } else self.current = self.source.len;
-
-                    self.start = self.current;
-                } else try self.addEmptyToken(.slash),
+                '/' => if (self.match('/')) try self.comment() else try self.addEmptyToken(.slash),
                 '*' => try self.addEmptyToken(.star),
                 '!' => try self.addEqualOperator(.bang, .bang_equal),
                 '=' => try self.addEqualOperator(.equal, .equal_equal),
                 '>' => try self.addEqualOperator(.greater, .greater_equal),
                 '<' => try self.addEqualOperator(.less, .less_equal),
-                '\t', ' ' => self.start = self.current,
-                '\n' => {
-                    self.line += 1;
-                    self.start = self.current;
-                },
-                '"' => {
-                    if (std.mem.indexOfScalarPos(u8, self.source, self.current, '"')) |end_of_string_index| {
-                        const lexeme = self.source[self.current - 1 .. end_of_string_index + 1];
-                        const literal = self.source[self.current..end_of_string_index];
-                        try self.tokens_list.append(self.allocator, .{ .tag = .string, .lexeme = lexeme, .literal = .{ .string = literal } });
-                        self.line += std.mem.count(u8, literal, "\n");
-                        self.current = end_of_string_index + 1;
-                    } else {
-                        try self.errors_list.append(self.allocator, .{ .line = self.line, .@"error" = .unterminated_string });
-                        self.current = self.source.len;
-                    }
-                    self.start = self.current;
-                },
-                else => {
-                    try self.errors_list.append(self.allocator, .{ .line = self.line, .@"error" = .{ .char = char } });
-                    self.start = self.current;
-                },
+                '\t', ' ' => {},
+                '\n' => self.line += 1,
+                '"' => try self.string(),
+                '0', '1', '2', '3', '4', '5', '6', '7', '8', '9' => try self.number(),
+                else => try self.unexpected_char(char),
             }
         }
 
-        try self.tokens_list.append(self.allocator, .{ .tag = .eof, .lexeme = "", .literal = empty_literal });
+        try self.addToken(.{ .tag = .eof, .lexeme = "", .literal = .{ .empty = {} } });
     }
 
     fn addEmptyToken(self: *Self, tag: TokenTag) !void {
-        return self.addToken(tag, empty_literal);
-    }
-
-    fn addToken(self: *Self, tag: TokenTag, literal: Literal) !void {
         const lexeme = self.source[self.start..self.current];
-        self.start = self.current;
-        try self.tokens_list.append(self.allocator, .{ .tag = tag, .lexeme = lexeme, .literal = literal });
+        try self.addToken(.{ .tag = tag, .lexeme = lexeme, .literal = .{ .empty = {} } });
     }
 
     fn addEqualOperator(self: *Self, short_tag: TokenTag, long_tag: TokenTag) !void {
@@ -181,6 +156,63 @@ const Scanner = struct {
         } else {
             try self.addEmptyToken(short_tag);
         }
+    }
+
+    fn comment(self: *Self) !void {
+        if (std.mem.indexOfScalarPos(u8, self.source, self.current, '\n')) |new_line_index| {
+            self.line += 1;
+            self.current = new_line_index + 1;
+        } else self.current = self.source.len;
+    }
+
+    fn string(self: *Self) !void {
+        if (std.mem.indexOfScalarPos(u8, self.source, self.current, '"')) |end_of_string_index| {
+            const lexeme = self.source[self.current - 1 .. end_of_string_index + 1];
+            const literal = self.source[self.current..end_of_string_index];
+            try self.addToken(.{ .tag = .string, .lexeme = lexeme, .literal = .{ .string = literal } });
+            self.line += std.mem.count(u8, literal, "\n");
+            self.current = end_of_string_index + 1;
+        } else {
+            try self.addError(.{ .line = self.line, .@"error" = .unterminated_string });
+            self.current = self.source.len;
+        }
+    }
+
+    fn number(self: *Self) !void {
+        const start_of_number = self.current - 1;
+        var end_of_number =
+            std.mem.indexOfNonePos(u8, self.source, self.current, "0123456789") orelse self.source.len;
+
+        self.current = end_of_number;
+
+        if (self.match('.')) {
+            if (std.mem.indexOfNonePos(u8, self.source, self.current, "0123456789")) |end_of_fraction| {
+                if (end_of_fraction > self.current) {
+                    end_of_number = end_of_fraction;
+                    self.current = end_of_fraction;
+                }
+            } else {
+                end_of_number = self.source.len;
+                self.current = self.source.len;
+            }
+        }
+
+        const lexeme = self.source[start_of_number..end_of_number];
+        const value = try std.fmt.parseFloat(f64, lexeme);
+
+        try self.addToken(.{ .tag = .number, .lexeme = lexeme, .literal = .{ .number = value } });
+    }
+
+    fn unexpected_char(self: *Self, char: u8) !void {
+        try self.addError(.{ .line = self.line, .@"error" = .{ .char = char } });
+    }
+
+    fn addToken(self: *Self, token: Token) !void {
+        try self.tokens_list.append(self.allocator, token);
+    }
+
+    fn addError(self: *Self, @"error": Error) !void {
+        try self.errors_list.append(self.allocator, @"error");
     }
 
     fn match(self: *Self, char: u8) bool {
@@ -331,4 +363,15 @@ test "scan string literals" {
     ,
         \\[line 1] Error: Unterminated string.
     );
+}
+
+test "scan number" {
+    try testScan("42",
+        \\NUMBER 42 42.0
+        \\EOF  null
+    , "");
+    try testScan("1234.1234",
+        \\NUMBER 1234.1234 1234.1234
+        \\EOF  null
+    , "");
 }
