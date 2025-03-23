@@ -23,12 +23,18 @@ pub fn main() !void {
     }
 
     const file_contents = try std.fs.cwd().readFileAlloc(allocator, filename, std.math.maxInt(usize));
-    defer allocator.free(file_contents);
 
-    const tokens: []const scan.Token = try scan.scan(file_contents, allocator);
+    const scan_result = try scan.scan(file_contents, allocator);
 
     const out = std.io.getStdOut().writer();
-    for (tokens) |token| {
+    for (scan_result.tokens) |token| {
         try out.print("{s}\n", .{token});
     }
+
+    const err = std.io.getStdErr().writer();
+    for (scan_result.errors) |@"error"| {
+        try err.print("{s}\n", .{@"error"});
+    }
+
+    if (scan_result.errors.len > 0) std.process.exit(65);
 }

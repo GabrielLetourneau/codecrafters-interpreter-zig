@@ -37,13 +37,30 @@ pub const Token = struct {
     }
 };
 
-pub fn scan(source: []const u8, allocator: std.mem.Allocator) ![]const Token {
-    var scanner: Scanner = .{ .source = source, .tokens_list = std.ArrayList(Token).init(allocator) };
-    defer scanner.tokens_list.deinit();
+pub const Error = struct {
+    line: usize,
+    char: u8,
+
+    pub fn format(self: Error, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        try writer.print("[line {d}] Error: Unexpected character: {c}", .{ self.line, self.char });
+    }
+};
+
+pub const ScanResult = struct {
+    tokens: []const Token,
+    errors: []const Error,
+};
+
+pub fn scan(source: []const u8, allocator: std.mem.Allocator) !ScanResult {
+    var scanner: Scanner = Scanner.init(source, allocator);
+    defer scanner.deinit();
 
     try scanner.scan();
 
-    return scanner.tokens_list.toOwnedSlice();
+    return .{
+        .tokens = try scanner.tokens_list.toOwnedSlice(allocator),
+        .errors = try scanner.errors_list.toOwnedSlice(allocator),
+    };
 }
 
 const Scanner = struct {
@@ -51,13 +68,30 @@ const Scanner = struct {
     start: usize = 0,
     current: usize = 0,
     line: usize = 1,
-    tokens_list: std.ArrayList(Token),
+    tokens_list: std.ArrayListUnmanaged(Token),
+    errors_list: std.ArrayListUnmanaged(Error),
+    allocator: std.mem.Allocator,
 
     const Self = @This();
 
+    fn init(source: []const u8, allocator: std.mem.Allocator) Scanner {
+        return .{
+            .source = source,
+            .tokens_list = .{},
+            .errors_list = .{},
+            .allocator = allocator,
+        };
+    }
+
+    fn deinit(self: *Self) void {
+        self.tokens_list.deinit(self.allocator);
+        self.errors_list.deinit(self.allocator);
+    }
+
     fn scan(self: *Self) !void {
         while (self.current < self.source.len) {
-            switch (self.source[self.current]) {
+            const char = self.source[self.current];
+            switch (char) {
                 '(' => try self.addEmptyToken(.left_paren),
                 ')' => try self.addEmptyToken(.right_paren),
                 '{' => try self.addEmptyToken(.left_brace),
@@ -69,11 +103,15 @@ const Scanner = struct {
                 ';' => try self.addEmptyToken(.semicolon),
                 '/' => try self.addEmptyToken(.slash),
                 '*' => try self.addEmptyToken(.star),
-                else => return error.UnexpectedCharacter,
+                else => {
+                    try self.errors_list.append(self.allocator, .{ .line = 1, .char = char });
+                    self.current += 1;
+                    self.start = self.current;
+                },
             }
         }
 
-        try self.tokens_list.append(.{ .tag = .eof, .lexeme = "", .literal = empty_literal });
+        try self.tokens_list.append(self.allocator, .{ .tag = .eof, .lexeme = "", .literal = empty_literal });
     }
 
     fn addEmptyToken(self: *Self, tag: TokenTag) !void {
@@ -84,46 +122,59 @@ const Scanner = struct {
         self.current += 1;
         const lexeme = self.source[self.start..self.current];
         self.start = self.current;
-        try self.tokens_list.append(.{ .tag = tag, .lexeme = lexeme, .literal = literal });
+        try self.tokens_list.append(self.allocator, .{ .tag = tag, .lexeme = lexeme, .literal = literal });
     }
 };
 
-fn testScan(source: []const u8, output: []const u8) !void {
+fn testScan(source: []const u8, output: []const u8, errors: []const u8) !void {
     const allocator = std.testing.allocator;
-    const tokens = try scan(source, allocator);
-    defer allocator.free(tokens);
+    const result = try scan(source, allocator);
+    defer {
+        allocator.free(result.tokens);
+        allocator.free(result.errors);
+    }
+
+    try matchResultSet(Token, result.tokens, output, allocator);
+    try matchResultSet(Error, result.errors, errors, allocator);
+}
+
+fn matchResultSet(ResultType: type, results: []const ResultType, output: []const u8, allocator: std.mem.Allocator) !void {
+    if (output.len == 0) {
+        try std.testing.expectEqual(0, results.len);
+        return;
+    }
 
     var expected_lines = std.mem.splitScalar(u8, output, '\n');
     var index: usize = 0;
     while (expected_lines.next()) |expected_line| {
-        // We shouldn’t have more tokens than expected
-        try std.testing.expect(index < tokens.len);
-        const token_string = try std.fmt.allocPrint(allocator, "{s}", .{tokens[index]});
+        // We shouldn’t have more results than expected
+        try std.testing.expect(index < results.len);
+        const token_string = try std.fmt.allocPrint(allocator, "{s}", .{results[index]});
         defer allocator.free(token_string);
         std.debug.print("expected: {s}, actual: {s}\n", .{ expected_line, token_string });
         try std.testing.expectEqualStrings(expected_line, token_string);
         index += 1;
     }
 
-    // Fails if we haven’t had all expected tokens.
-    try std.testing.expectEqual(index, tokens.len);
+    // Fails if we haven’t had all expected results.
+    try std.testing.expectEqual(index, results.len);
 }
 
 test "scan single character tokens" {
-    try testScan("", "EOF  null");
+    try testScan("", "EOF  null", "");
     try testScan("(()",
         \\LEFT_PAREN ( null
         \\LEFT_PAREN ( null
         \\RIGHT_PAREN ) null
         \\EOF  null
-    );
+    , "");
     try testScan("{{}}",
         \\LEFT_BRACE { null
         \\LEFT_BRACE { null
         \\RIGHT_BRACE } null
         \\RIGHT_BRACE } null
         \\EOF  null
-    );
+    , "");
     try testScan("({*.,+*})",
         \\LEFT_PAREN ( null
         \\LEFT_BRACE { null
@@ -135,5 +186,14 @@ test "scan single character tokens" {
         \\RIGHT_BRACE } null
         \\RIGHT_PAREN ) null
         \\EOF  null
+    , "");
+    try testScan(",.$(#",
+        \\COMMA , null
+        \\DOT . null
+        \\LEFT_PAREN ( null
+        \\EOF  null
+    ,
+        \\[line 1] Error: Unexpected character: $
+        \\[line 1] Error: Unexpected character: #
     );
 }
