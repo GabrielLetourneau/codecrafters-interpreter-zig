@@ -14,6 +14,10 @@ pub const TokenTag = enum {
     slash,
     star,
 
+    // One or two character tokens.
+    equal,
+    equal_equal,
+
     // end of unit
     eof,
 };
@@ -91,6 +95,7 @@ const Scanner = struct {
     fn scan(self: *Self) !void {
         while (self.current < self.source.len) {
             const char = self.source[self.current];
+            self.current += 1;
             switch (char) {
                 '(' => try self.addEmptyToken(.left_paren),
                 ')' => try self.addEmptyToken(.right_paren),
@@ -103,9 +108,14 @@ const Scanner = struct {
                 ';' => try self.addEmptyToken(.semicolon),
                 '/' => try self.addEmptyToken(.slash),
                 '*' => try self.addEmptyToken(.star),
+                '=' => if (self.current < self.source.len and self.source[self.current] == '=') {
+                    self.current += 1;
+                    try self.addEmptyToken(.equal_equal);
+                } else {
+                    try self.addEmptyToken(.equal);
+                },
                 else => {
                     try self.errors_list.append(self.allocator, .{ .line = 1, .char = char });
-                    self.current += 1;
                     self.start = self.current;
                 },
             }
@@ -119,7 +129,6 @@ const Scanner = struct {
     }
 
     fn addToken(self: *Self, tag: TokenTag, literal: Literal) !void {
-        self.current += 1;
         const lexeme = self.source[self.start..self.current];
         self.start = self.current;
         try self.tokens_list.append(self.allocator, .{ .tag = tag, .lexeme = lexeme, .literal = literal });
@@ -196,4 +205,15 @@ test "scan single character tokens" {
         \\[line 1] Error: Unexpected character: $
         \\[line 1] Error: Unexpected character: #
     );
+}
+
+test "scan one or two character tokens" {
+    try testScan("={===}",
+        \\EQUAL = null
+        \\LEFT_BRACE { null
+        \\EQUAL_EQUAL == null
+        \\EQUAL = null
+        \\RIGHT_BRACE } null
+        \\EOF  null
+    , "");
 }
