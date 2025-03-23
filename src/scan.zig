@@ -114,6 +114,7 @@ const Scanner = struct {
                 ';' => try self.addEmptyToken(.semicolon),
                 '/' => if (self.match('/')) {
                     if (std.mem.indexOfScalar(u8, self.source[self.current..], '\n')) |new_line_index| {
+                        self.line += 1;
                         self.current += new_line_index + 1;
                     } else self.current = self.source.len;
 
@@ -124,11 +125,13 @@ const Scanner = struct {
                 '=' => try self.addEqualOperator(.equal, .equal_equal),
                 '>' => try self.addEqualOperator(.greater, .greater_equal),
                 '<' => try self.addEqualOperator(.less, .less_equal),
-                '\t', ' ', '\n' => {
+                '\t', ' ' => self.start = self.current,
+                '\n' => {
+                    self.line += 1;
                     self.start = self.current;
                 },
                 else => {
-                    try self.errors_list.append(self.allocator, .{ .line = 1, .char = char });
+                    try self.errors_list.append(self.allocator, .{ .line = self.line, .char = char });
                     self.start = self.current;
                 },
             }
@@ -280,4 +283,15 @@ test "scan whitespace" {
         \\PLUS + null
         \\EOF  null
     , "");
+}
+
+test "scan multi-line errors" {
+    try testScan("# (\n)\t@",
+        \\LEFT_PAREN ( null
+        \\RIGHT_PAREN ) null
+        \\EOF  null
+    ,
+        \\[line 1] Error: Unexpected character: #
+        \\[line 2] Error: Unexpected character: @
+    );
 }
