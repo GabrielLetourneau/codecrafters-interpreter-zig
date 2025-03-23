@@ -112,7 +112,13 @@ const Scanner = struct {
                 '-' => try self.addEmptyToken(.minus),
                 '+' => try self.addEmptyToken(.plus),
                 ';' => try self.addEmptyToken(.semicolon),
-                '/' => try self.addEmptyToken(.slash),
+                '/' => if (self.match('/')) {
+                    if (std.mem.indexOfScalar(u8, self.source[self.current..], '\n')) |new_line_index| {
+                        self.current += new_line_index + 1;
+                    } else self.current = self.source.len;
+
+                    self.start = self.current;
+                } else try self.addEmptyToken(.slash),
                 '*' => try self.addEmptyToken(.star),
                 '!' => try self.addEqualOperator(.bang, .bang_equal),
                 '=' => try self.addEqualOperator(.equal, .equal_equal),
@@ -139,12 +145,18 @@ const Scanner = struct {
     }
 
     fn addEqualOperator(self: *Self, short_tag: TokenTag, long_tag: TokenTag) !void {
-        if (self.current < self.source.len and self.source[self.current] == '=') {
-            self.current += 1;
+        if (self.match('=')) {
             try self.addEmptyToken(long_tag);
         } else {
             try self.addEmptyToken(short_tag);
         }
+    }
+
+    fn match(self: *Self, char: u8) bool {
+        if (self.current < self.source.len and self.source[self.current] == char) {
+            self.current += 1;
+            return true;
+        } else return false;
     }
 };
 
@@ -233,6 +245,20 @@ test "scan one or two character tokens" {
         \\BANG ! null
         \\BANG_EQUAL != null
         \\EQUAL_EQUAL == null
+        \\EOF  null
+    , "");
+}
+
+test "scan slash vs comment" {
+    try testScan("()// Comment",
+        \\LEFT_PAREN ( null
+        \\RIGHT_PAREN ) null
+        \\EOF  null
+    , "");
+    try testScan("/()",
+        \\SLASH / null
+        \\LEFT_PAREN ( null
+        \\RIGHT_PAREN ) null
         \\EOF  null
     , "");
 }
