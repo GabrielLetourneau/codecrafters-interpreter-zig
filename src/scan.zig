@@ -15,8 +15,14 @@ pub const TokenTag = enum {
     star,
 
     // One or two character tokens.
+    bang,
+    bang_equal,
     equal,
     equal_equal,
+    greater,
+    greater_equal,
+    less,
+    less_equal,
 
     // end of unit
     eof,
@@ -108,12 +114,10 @@ const Scanner = struct {
                 ';' => try self.addEmptyToken(.semicolon),
                 '/' => try self.addEmptyToken(.slash),
                 '*' => try self.addEmptyToken(.star),
-                '=' => if (self.current < self.source.len and self.source[self.current] == '=') {
-                    self.current += 1;
-                    try self.addEmptyToken(.equal_equal);
-                } else {
-                    try self.addEmptyToken(.equal);
-                },
+                '!' => try self.addEqualOperator(.bang, .bang_equal),
+                '=' => try self.addEqualOperator(.equal, .equal_equal),
+                '>' => try self.addEqualOperator(.greater, .greater_equal),
+                '<' => try self.addEqualOperator(.less, .less_equal),
                 else => {
                     try self.errors_list.append(self.allocator, .{ .line = 1, .char = char });
                     self.start = self.current;
@@ -132,6 +136,15 @@ const Scanner = struct {
         const lexeme = self.source[self.start..self.current];
         self.start = self.current;
         try self.tokens_list.append(self.allocator, .{ .tag = tag, .lexeme = lexeme, .literal = literal });
+    }
+
+    fn addEqualOperator(self: *Self, short_tag: TokenTag, long_tag: TokenTag) !void {
+        if (self.current < self.source.len and self.source[self.current] == '=') {
+            self.current += 1;
+            try self.addEmptyToken(long_tag);
+        } else {
+            try self.addEmptyToken(short_tag);
+        }
     }
 };
 
@@ -214,6 +227,12 @@ test "scan one or two character tokens" {
         \\EQUAL_EQUAL == null
         \\EQUAL = null
         \\RIGHT_BRACE } null
+        \\EOF  null
+    , "");
+    try testScan("!!===",
+        \\BANG ! null
+        \\BANG_EQUAL != null
+        \\EQUAL_EQUAL == null
         \\EOF  null
     , "");
 }
