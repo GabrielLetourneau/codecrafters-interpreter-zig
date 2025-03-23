@@ -124,6 +124,9 @@ const Scanner = struct {
                 '=' => try self.addEqualOperator(.equal, .equal_equal),
                 '>' => try self.addEqualOperator(.greater, .greater_equal),
                 '<' => try self.addEqualOperator(.less, .less_equal),
+                '\t', ' ', '\n' => {
+                    self.start = self.current;
+                },
                 else => {
                     try self.errors_list.append(self.allocator, .{ .line = 1, .char = char });
                     self.start = self.current;
@@ -259,6 +262,22 @@ test "scan slash vs comment" {
         \\SLASH / null
         \\LEFT_PAREN ( null
         \\RIGHT_PAREN ) null
+        \\EOF  null
+    , "");
+}
+
+test "scan whitespace" {
+    try testScan("(\t )",
+        \\LEFT_PAREN ( null
+        \\RIGHT_PAREN ) null
+        \\EOF  null
+    , "");
+    try testScan("{\n }\n((+",
+        \\LEFT_BRACE { null
+        \\RIGHT_BRACE } null
+        \\LEFT_PAREN ( null
+        \\LEFT_PAREN ( null
+        \\PLUS + null
         \\EOF  null
     , "");
 }
