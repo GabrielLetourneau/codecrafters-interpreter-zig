@@ -24,12 +24,16 @@ pub const TokenTag = enum {
     less,
     less_equal,
 
+    // Literals.
+    string,
+
     // end of unit
     eof,
 };
 
 pub const Literal = union {
     empty: void,
+    string: []const u8,
 };
 
 const empty_literal: Literal = .{ .empty = {} };
@@ -43,16 +47,24 @@ pub const Token = struct {
         for (@tagName(self.tag)) |char| {
             try writer.writeByte(std.ascii.toUpper(char));
         }
-        try writer.print(" {s} null", .{self.lexeme});
+        try writer.print(" {s} ", .{self.lexeme});
+        switch (self.tag) {
+            .string => try writer.writeAll(self.literal.string),
+            else => try writer.writeAll("null"),
+        }
     }
 };
 
 pub const Error = struct {
     line: usize,
-    char: u8,
+    @"error": union(enum) { char: u8, unterminated_string: void },
 
     pub fn format(self: Error, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        try writer.print("[line {d}] Error: Unexpected character: {c}", .{ self.line, self.char });
+        try writer.print("[line {d}] Error: ", .{self.line});
+        switch (self.@"error") {
+            .char => |char| try writer.print("Unexpected character: {c}", .{char}),
+            .unterminated_string => try writer.writeAll("Unterminated string."),
+        }
     }
 };
 
@@ -113,9 +125,9 @@ const Scanner = struct {
                 '+' => try self.addEmptyToken(.plus),
                 ';' => try self.addEmptyToken(.semicolon),
                 '/' => if (self.match('/')) {
-                    if (std.mem.indexOfScalar(u8, self.source[self.current..], '\n')) |new_line_index| {
+                    if (std.mem.indexOfScalarPos(u8, self.source, self.current, '\n')) |new_line_index| {
                         self.line += 1;
-                        self.current += new_line_index + 1;
+                        self.current = new_line_index + 1;
                     } else self.current = self.source.len;
 
                     self.start = self.current;
@@ -130,8 +142,21 @@ const Scanner = struct {
                     self.line += 1;
                     self.start = self.current;
                 },
+                '"' => {
+                    if (std.mem.indexOfScalarPos(u8, self.source, self.current, '"')) |end_of_string_index| {
+                        const lexeme = self.source[self.current - 1 .. end_of_string_index + 1];
+                        const literal = self.source[self.current..end_of_string_index];
+                        try self.tokens_list.append(self.allocator, .{ .tag = .string, .lexeme = lexeme, .literal = .{ .string = literal } });
+                        self.line += std.mem.count(u8, literal, "\n");
+                        self.current = end_of_string_index + 1;
+                    } else {
+                        try self.errors_list.append(self.allocator, .{ .line = self.line, .@"error" = .unterminated_string });
+                        self.current = self.source.len;
+                    }
+                    self.start = self.current;
+                },
                 else => {
-                    try self.errors_list.append(self.allocator, .{ .line = self.line, .char = char });
+                    try self.errors_list.append(self.allocator, .{ .line = self.line, .@"error" = .{ .char = char } });
                     self.start = self.current;
                 },
             }
@@ -293,5 +318,17 @@ test "scan multi-line errors" {
     ,
         \\[line 1] Error: Unexpected character: #
         \\[line 2] Error: Unexpected character: @
+    );
+}
+
+test "scan string literals" {
+    try testScan("\"foo baz\"",
+        \\STRING "foo baz" foo baz
+        \\EOF  null
+    , "");
+    try testScan("\"bar",
+        \\EOF  null
+    ,
+        \\[line 1] Error: Unterminated string.
     );
 }
