@@ -1,6 +1,6 @@
 const std = @import("std");
 
-pub const TokenTag = enum {
+pub const TokenTag = enum(u8) {
     // Single-character tokens.
     left_paren,
     right_paren,
@@ -28,6 +28,24 @@ pub const TokenTag = enum {
     identifier,
     string,
     number,
+
+    // Keywords.
+    @"and",
+    class,
+    @"else",
+    false,
+    fun,
+    @"for",
+    @"if",
+    nil,
+    @"or",
+    print,
+    @"return",
+    super,
+    this,
+    true,
+    @"var",
+    @"while",
 };
 
 pub const Token = struct {
@@ -107,7 +125,7 @@ pub fn next(self: *Self) ?Result {
             '\n' => self.line += 1,
             '"' => self.string(),
             '0'...'9' => self.number(),
-            'a'...'z', 'A'...'Z', '_' => self.identifier(),
+            'a'...'z', 'A'...'Z', '_' => self.identifierOrKeyword(),
             else => self.unexpected_char(char),
         }
     }
@@ -174,7 +192,7 @@ fn number(self: *Self) void {
     self.addToken(.{ .tag = .number, .lexeme = lexeme, .literal = .{ .number = value } });
 }
 
-fn identifier(self: *Self) void {
+fn identifierOrKeyword(self: *Self) void {
     while (self.current < self.source.len) {
         const char = self.source[self.current];
         if (char >= 'a' and char <= 'z' or
@@ -187,6 +205,18 @@ fn identifier(self: *Self) void {
     }
 
     const lexeme = self.source[self.start..self.current];
+
+    var tag = TokenTag.@"and";
+    while (true) {
+        if (std.mem.eql(u8, @tagName(tag), lexeme)) {
+            self.addToken(.{ .tag = tag, .lexeme = lexeme, .literal = .{ .empty = {} } });
+            return;
+        }
+
+        if (tag == .@"while") break;
+        tag = @enumFromInt(@intFromEnum(tag) + 1);
+    }
+
     self.addToken(.{ .tag = .identifier, .lexeme = lexeme, .literal = .{ .empty = {} } });
 }
 
@@ -348,5 +378,8 @@ test "scan identifier" {
         \\IDENTIFIER bar null
         \\IDENTIFIER _hello null
         \\IDENTIFIER _1234 null
+    , "");
+    try testScan("and",
+        \\AND and null
     , "");
 }
