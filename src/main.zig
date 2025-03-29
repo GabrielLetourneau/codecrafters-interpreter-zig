@@ -1,5 +1,5 @@
 const std = @import("std");
-const scan = @import("scan.zig");
+const Scanner = @import("Scanner.zig");
 
 pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
@@ -24,17 +24,23 @@ pub fn main() !void {
 
     const file_contents = try std.fs.cwd().readFileAlloc(allocator, filename, std.math.maxInt(usize));
 
-    const scan_result = try scan.scan(file_contents, allocator);
-
+    var scanner: Scanner = .{ .source = file_contents };
+    var hasErrors = false;
     const out = std.io.getStdOut().writer();
-    for (scan_result.tokens) |token| {
-        try out.print("{s}\n", .{token});
-    }
-
     const err = std.io.getStdErr().writer();
-    for (scan_result.errors) |@"error"| {
-        try err.print("{s}\n", .{@"error"});
+
+    while (scanner.next()) |result| {
+        switch (result) {
+            .token => |token| try out.print("{s}\n", .{token}),
+            .@"error" => |@"error"| {
+                try err.print("{s}\n", .{@"error"});
+                hasErrors = true;
+            },
+        }
     }
 
-    if (scan_result.errors.len > 0) std.process.exit(65);
+    try out.writeAll("EOF  null\n");
+
+    if (hasErrors)
+        std.process.exit(65);
 }
