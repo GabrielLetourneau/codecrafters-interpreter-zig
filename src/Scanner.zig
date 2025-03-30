@@ -87,10 +87,7 @@ pub const Error = struct {
     }
 };
 
-pub const Result = union(enum) {
-    token: Token,
-    @"error": Error,
-};
+pub const Result = union(enum) { token: Token, @"error": Error };
 
 source: []const u8,
 start: usize = 0,

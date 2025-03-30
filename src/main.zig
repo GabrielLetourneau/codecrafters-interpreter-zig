@@ -1,31 +1,45 @@
 const std = @import("std");
 const Scanner = @import("Scanner.zig");
+const Parser = @import("Parser.zig");
 
 pub fn main() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    var gpa: std.heap.DebugAllocator(.{}) = .{};
+    defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
 
     const args = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, args);
 
     if (args.len < 3) {
-        std.debug.print("Usage: ./your_program.sh tokenize <filename>\n", .{});
+        std.debug.print("Usage: ./your_program.sh <command> <filename>\n", .{});
         std.process.exit(1);
     }
 
     const command = args[1];
     const filename = args[2];
 
-    if (!std.mem.eql(u8, command, "tokenize")) {
-        std.debug.print("Unknown command: {s}\n", .{command});
-        std.process.exit(1);
-    }
+    const command_tag: CommandTag =
+        if (std.meta.stringToEnum(CommandTag, command)) |actual| actual else {
+            std.debug.print("Unknown command: {s}\n", .{command});
+            std.process.exit(1);
+        };
 
     const file_contents = try std.fs.cwd().readFileAlloc(allocator, filename, std.math.maxInt(usize));
+    defer allocator.free(file_contents);
 
     var scanner: Scanner = .{ .source = file_contents };
+
+    switch (command_tag) {
+        .tokenize => try scan(&scanner),
+        .parse => try parse(&scanner, allocator),
+    }
+}
+
+const CommandTag = enum { tokenize, parse };
+
+fn scan(scanner: *Scanner) !void {
     var hasErrors = false;
+
     const out = std.io.getStdOut().writer();
     const err = std.io.getStdErr().writer();
 
@@ -43,4 +57,16 @@ pub fn main() !void {
 
     if (hasErrors)
         std.process.exit(65);
+}
+
+fn parse(scanner: *Scanner, allocator: std.mem.Allocator) !void {
+    var parser: Parser = .{ .scanner = scanner, .allocator = allocator };
+    defer parser.deinit();
+
+    try parser.parse();
+
+    if (parser.ast().head()) |head_node| {
+        const out = std.io.getStdOut().writer();
+        try out.print("{s}\n", .{head_node});
+    }
 }
