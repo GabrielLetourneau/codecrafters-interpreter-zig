@@ -6,9 +6,12 @@ pub const NodeTag = enum(u8) {
     true,
     false,
 
-    // Primary Expressions, with data
+    // Primary expressions, with data
     number,
     string,
+
+    // Unary expressions, no data
+    group,
 };
 
 pub const Data = union {
@@ -32,7 +35,12 @@ pub const Node = struct {
                 if (literal_number == @trunc(literal_number)) try writer.writeAll(".0");
             },
             .string => try writer.writeAll(self.ast.data[self.data_index].string),
+            .group => try writer.print("(group {s})", .{self.child()}),
         }
+    }
+
+    fn child(self: Self) Self {
+        return .{ .ast = self.ast, .tag_index = self.tag_index + 1, .data_index = self.data_index };
     }
 };
 

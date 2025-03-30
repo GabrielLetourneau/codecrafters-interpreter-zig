@@ -34,6 +34,10 @@ fn primary(self: *Self) !void {
         try self.addTagAndData(.number, .{ .number = token.literal.number });
     } else if (self.match(.string)) |token| {
         try self.addTagAndData(.string, .{ .string = token.literal.string });
+    } else if (self.match(.left_paren) != null) {
+        try self.addTag(.group);
+        try self.primary();
+        _ = self.match(.right_paren);
     }
 }
 
@@ -89,4 +93,5 @@ test "parse primary expressions" {
     try testParse("false", "false");
     try testParse("42.47", "42.47");
     try testParse("\"hello\"", "hello");
+    try testParse("(\"foo\")", "(group foo)");
 }
