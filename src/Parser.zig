@@ -32,6 +32,8 @@ fn primary(self: *Self) !void {
         try self.addTag(.false);
     } else if (self.match(.number)) |token| {
         try self.addTagAndData(.number, .{ .number = token.literal.number });
+    } else if (self.match(.string)) |token| {
+        try self.addTagAndData(.string, .{ .string = token.literal.string });
     }
 }
 
@@ -86,4 +88,5 @@ test "parse primary expressions" {
     try testParse("true", "true");
     try testParse("false", "false");
     try testParse("42.47", "42.47");
+    try testParse("\"hello\"", "hello");
 }

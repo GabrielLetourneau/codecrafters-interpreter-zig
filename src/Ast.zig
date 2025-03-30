@@ -8,10 +8,12 @@ pub const NodeTag = enum(u8) {
 
     // Primary Expressions, with data
     number,
+    string,
 };
 
 pub const Data = union {
     number: f64,
+    string: []const u8,
 };
 
 pub const Node = struct {
@@ -29,6 +31,7 @@ pub const Node = struct {
                 try writer.print("{d}", .{literal_number});
                 if (literal_number == @trunc(literal_number)) try writer.writeAll(".0");
             },
+            .string => try writer.writeAll(self.ast.data[self.data_index].string),
         }
     }
 };
