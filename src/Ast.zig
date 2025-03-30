@@ -12,6 +12,8 @@ pub const NodeTag = enum(u8) {
 
     // Unary expressions, no data
     group,
+    not,
+    unary_minus,
 };
 
 pub const Data = union {
@@ -36,6 +38,8 @@ pub const Node = struct {
             },
             .string => try writer.writeAll(self.ast.data[self.data_index].string),
             .group => try writer.print("(group {s})", .{self.child()}),
+            .not => try writer.print("(! {s})", .{self.child()}),
+            .unary_minus => try writer.print("(- {s})", .{self.child()}),
         }
     }
 

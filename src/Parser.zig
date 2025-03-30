@@ -16,14 +16,27 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn parse(self: *Self) !void {
-    try self.primary();
+    _ = try self.expression();
 }
 
 pub fn ast(self: Self) Ast {
     return .{ .tags = self.tags_list.items, .data = self.data_list.items };
 }
 
-fn primary(self: *Self) !void {
+fn expression(self: *Self) std.mem.Allocator.Error!bool {
+    return try self.unary() or try self.primary();
+}
+
+fn unary(self: *Self) !bool {
+    const tag: Ast.NodeTag =
+        if (self.match(.bang) != null) .not else if (self.match(.minus) != null) .unary_minus else return false;
+
+    try self.addTag(tag);
+    _ = try self.expression();
+    return true;
+}
+
+fn primary(self: *Self) !bool {
     if (self.match(.nil) != null) {
         try self.addTag(.nil);
     } else if (self.match(.true) != null) {
@@ -36,9 +49,10 @@ fn primary(self: *Self) !void {
         try self.addTagAndData(.string, .{ .string = token.literal.string });
     } else if (self.match(.left_paren) != null) {
         try self.addTag(.group);
-        try self.primary();
+        _ = try self.expression();
         _ = self.match(.right_paren);
     }
+    return true;
 }
 
 fn match(self: *Self, token_tag: Scanner.TokenTag) ?Scanner.Token {
@@ -94,4 +108,8 @@ test "parse primary expressions" {
     try testParse("42.47", "42.47");
     try testParse("\"hello\"", "hello");
     try testParse("(\"foo\")", "(group foo)");
+}
+
+test "parse unary expressions" {
+    try testParse("!true", "(! true)");
 }
