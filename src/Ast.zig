@@ -24,6 +24,8 @@ pub const NodeTag = enum(u8) {
     greater_equal,
     less,
     less_equal,
+    equal,
+    not_equal,
 };
 
 pub const Data = union {
@@ -62,6 +64,8 @@ pub const Node = struct {
             .greater_equal => try writer.print("(>= {s} {s})", .{ self.lhs(), self.rhs() }),
             .less => try writer.print("(< {s} {s})", .{ self.lhs(), self.rhs() }),
             .less_equal => try writer.print("(<= {s} {s})", .{ self.lhs(), self.rhs() }),
+            .equal => try writer.print("(== {s} {s})", .{ self.lhs(), self.rhs() }),
+            .not_equal => try writer.print("(!= {s} {s})", .{ self.lhs(), self.rhs() }),
         }
     }
 

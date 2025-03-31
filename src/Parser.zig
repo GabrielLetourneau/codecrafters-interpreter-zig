@@ -31,7 +31,27 @@ pub fn parse(self: *Self) !?Ast.Node {
 }
 
 fn expression(self: *Self) std.mem.Allocator.Error!void {
+    try self.equality();
+}
+
+fn equality(self: *Self) !void {
     try self.comparison();
+
+    var lhs_reference = self.lastIndexes();
+
+    while (true) {
+        const tag: Ast.NodeTag = blk: {
+            if (self.match(.equal_equal) != null) break :blk .equal;
+            if (self.match(.bang_equal) != null) break :blk .not_equal;
+            return;
+        };
+
+        try self.comparison();
+
+        try self.addData(tag, lhs_reference);
+
+        lhs_reference = self.lastIndexes();
+    }
 }
 
 fn comparison(self: *Self) !void {
@@ -200,4 +220,5 @@ test "parse binary expressions" {
     try testParse("52 + 80 - 94", "(- (+ 52.0 80.0) 94.0)");
     try testParse("(-92 + 90) * (60 * 99) / (39 + 51)", "(/ (* (group (+ (- 92.0) 90.0)) (group (* 60.0 99.0))) (group (+ 39.0 51.0)))");
     try testParse("83 < 99 < 115", "(< (< 83.0 99.0) 115.0)");
+    try testParse("\"baz\" == \"baz\"", "(== baz baz)");
 }
