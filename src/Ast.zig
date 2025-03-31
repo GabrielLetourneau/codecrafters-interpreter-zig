@@ -20,10 +20,10 @@ pub const NodeTag = enum(u8) {
     divide,
     add,
     substract,
-    greater_than,
-    greater_than_equal,
-    lower_than,
-    lower_than_equal,
+    greater,
+    greater_equal,
+    less,
+    less_equal,
 };
 
 pub const Data = union {
@@ -58,10 +58,10 @@ pub const Node = struct {
             .divide => try writer.print("(/ {s} {s})", .{ self.lhs(), self.rhs() }),
             .add => try writer.print("(+ {s} {s})", .{ self.lhs(), self.rhs() }),
             .substract => try writer.print("(- {s} {s})", .{ self.lhs(), self.rhs() }),
-            .greater_than => try writer.print("(> {s} {s})", .{ self.lhs(), self.rhs() }),
-            .greater_than_equal => try writer.print("(>= {s} {s})", .{ self.lhs(), self.rhs() }),
-            .lower_than => try writer.print("(< {s} {s})", .{ self.lhs(), self.rhs() }),
-            .lower_than_equal => try writer.print("(<= {s} {s})", .{ self.lhs(), self.rhs() }),
+            .greater => try writer.print("(> {s} {s})", .{ self.lhs(), self.rhs() }),
+            .greater_equal => try writer.print("(>= {s} {s})", .{ self.lhs(), self.rhs() }),
+            .less => try writer.print("(< {s} {s})", .{ self.lhs(), self.rhs() }),
+            .less_equal => try writer.print("(<= {s} {s})", .{ self.lhs(), self.rhs() }),
         }
     }
 

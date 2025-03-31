@@ -41,10 +41,10 @@ fn comparison(self: *Self) !void {
 
     while (true) {
         const tag: Ast.NodeTag = blk: {
-            if (self.match(.greater_than) != null) break :blk .greater_than;
-            if (self.match(.greater_than_equal) != null) break :blk .greater_than_equal;
-            if (self.match(.lower_than) != null) break :blk .lower_than;
-            if (self.match(.lower_than_equal) != null) break :blk .lower_than_equal;
+            if (self.match(.greater) != null) break :blk .greater;
+            if (self.match(.greater_equal) != null) break :blk .greater_equal;
+            if (self.match(.less) != null) break :blk .less;
+            if (self.match(.less_equal) != null) break :blk .less_equal;
             return;
         };
 
@@ -199,4 +199,5 @@ test "parse binary expressions" {
     try testParse("16 * 38 / 58", "(/ (* 16.0 38.0) 58.0)");
     try testParse("52 + 80 - 94", "(- (+ 52.0 80.0) 94.0)");
     try testParse("(-92 + 90) * (60 * 99) / (39 + 51)", "(/ (* (group (+ (- 92.0) 90.0)) (group (* 60.0 99.0))) (group (+ 39.0 51.0)))");
+    try testParse("83 < 99 < 115", "(< (< 83.0 99.0) 115.0)");
 }
