@@ -78,7 +78,9 @@ fn unary(self: *Self) !void {
     const tag: Ast.NodeTag = blk: {
         if (self.match(.bang) != null) break :blk .not;
         if (self.match(.minus) != null) break :blk .unary_minus;
-        return try self.primary();
+
+        try self.primary();
+        return;
     };
 
     try self.unary();
@@ -98,7 +100,8 @@ fn primary(self: *Self) !void {
     } else if (self.match(.string)) |token| {
         try self.addData(.string, .{ .string = token.literal.string });
     } else if (self.match(.left_paren) != null) {
-        _ = try self.expression();
+        try self.expression();
+        _ = self.match(.right_paren);
         try self.addEmpty(.group);
     }
 }
@@ -173,4 +176,5 @@ test "parse unary expressions" {
 test "parse binary expressions" {
     try testParse("16 * 38 / 58", "(/ (* 16.0 38.0) 58.0)");
     try testParse("52 + 80 - 94", "(- (+ 52.0 80.0) 94.0)");
+    try testParse("(-92 + 90) * (60 * 99) / (39 + 51)", "(/ (* (group (+ (- 92.0) 90.0)) (group (* 60.0 99.0))) (group (+ 39.0 51.0)))");
 }
