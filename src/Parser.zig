@@ -30,7 +30,7 @@ pub fn parse(self: *Self) !?Ast.Node {
     } else return null;
 }
 
-fn expression(self: *Self) std.mem.Allocator.Error!void {
+fn expression(self: *Self) error{ OutOfMemory, Syntax }!void {
     try self.equality();
 }
 
@@ -143,9 +143,12 @@ fn primary(self: *Self) !void {
         try self.addData(.string, .{ .string = token.literal.string });
     } else if (self.match(.left_paren) != null) {
         try self.expression();
-        _ = self.match(.right_paren);
+
+        if (self.match(.right_paren) == null)
+            return error.Syntax;
+
         try self.addEmpty(.group);
-    }
+    } else return error.Syntax;
 }
 
 fn match(self: *Self, token_tag: Scanner.TokenTag) ?Scanner.Token {
@@ -221,4 +224,8 @@ test "parse binary expressions" {
     try testParse("(-92 + 90) * (60 * 99) / (39 + 51)", "(/ (* (group (+ (- 92.0) 90.0)) (group (* 60.0 99.0))) (group (+ 39.0 51.0)))");
     try testParse("83 < 99 < 115", "(< (< 83.0 99.0) 115.0)");
     try testParse("\"baz\" == \"baz\"", "(== baz baz)");
+}
+
+test "syntax error" {
+    try std.testing.expectError(error.Syntax, testParse("(72 +)", ""));
 }

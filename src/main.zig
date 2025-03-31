@@ -63,7 +63,15 @@ fn parse(scanner: *Scanner, allocator: std.mem.Allocator) !void {
     var parser: Parser = .{ .scanner = scanner, .allocator = allocator };
     defer parser.deinit();
 
-    if (try parser.parse()) |head_node| {
+    const maybe_head_node = parser.parse() catch |err| switch (err) {
+        error.Syntax => {
+            try std.io.getStdErr().writer().writeAll("Syntax error\n");
+            std.process.exit(65);
+        },
+        else => return,
+    };
+
+    if (maybe_head_node) |head_node| {
         const out = std.io.getStdOut().writer();
         try out.print("{s}\n", .{head_node});
     }
