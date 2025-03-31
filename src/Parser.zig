@@ -15,44 +15,72 @@ pub fn deinit(self: *Self) void {
     self.tags_list.deinit(self.allocator);
 }
 
-pub fn parse(self: *Self) !void {
-    _ = try self.expression();
+pub fn parse(self: *Self) !?Ast.Node {
+    try self.expression();
+    if (self.tags_list.items.len > 0) {
+        const indexes = self.lastIndexes().lhs_reference;
+        return .{
+            .ast = .{
+                .tags = self.tags_list.items,
+                .data = self.data_list.items,
+            },
+            .tag_index = indexes.tag_index,
+            .data_index = indexes.data_index,
+        };
+    } else return null;
 }
 
-pub fn ast(self: Self) Ast {
-    return .{ .tags = self.tags_list.items, .data = self.data_list.items };
+fn expression(self: *Self) std.mem.Allocator.Error!void {
+    try self.factor();
 }
 
-fn expression(self: *Self) std.mem.Allocator.Error!bool {
-    return try self.unary() or try self.primary();
-}
+fn factor(self: *Self) !void {
+    try self.unary();
 
-fn unary(self: *Self) !bool {
-    const tag: Ast.NodeTag =
-        if (self.match(.bang) != null) .not else if (self.match(.minus) != null) .unary_minus else return false;
+    var lhs_reference = self.lastIndexes();
 
-    try self.addTag(tag);
-    _ = try self.expression();
-    return true;
-}
+    while (true) {
+        const tag: Ast.NodeTag = blk: {
+            if (self.match(.star) != null) break :blk .multiply;
+            if (self.match(.slash) != null) break :blk .divide;
+            return;
+        };
 
-fn primary(self: *Self) !bool {
-    if (self.match(.nil) != null) {
-        try self.addTag(.nil);
-    } else if (self.match(.true) != null) {
-        try self.addTag(.true);
-    } else if (self.match(.false) != null) {
-        try self.addTag(.false);
-    } else if (self.match(.number)) |token| {
-        try self.addTagAndData(.number, .{ .number = token.literal.number });
-    } else if (self.match(.string)) |token| {
-        try self.addTagAndData(.string, .{ .string = token.literal.string });
-    } else if (self.match(.left_paren) != null) {
-        try self.addTag(.group);
-        _ = try self.expression();
-        _ = self.match(.right_paren);
+        try self.unary();
+
+        try self.addData(tag, lhs_reference);
+
+        lhs_reference = self.lastIndexes();
     }
-    return true;
+}
+
+fn unary(self: *Self) !void {
+    const tag: Ast.NodeTag = blk: {
+        if (self.match(.bang) != null) break :blk .not;
+        if (self.match(.minus) != null) break :blk .unary_minus;
+        return try self.primary();
+    };
+
+    try self.unary();
+
+    try self.addEmpty(tag);
+}
+
+fn primary(self: *Self) !void {
+    if (self.match(.nil) != null) {
+        try self.addEmpty(.nil);
+    } else if (self.match(.true) != null) {
+        try self.addEmpty(.true);
+    } else if (self.match(.false) != null) {
+        try self.addEmpty(.false);
+    } else if (self.match(.number)) |token| {
+        try self.addData(.number, .{ .number = token.literal.number });
+    } else if (self.match(.string)) |token| {
+        try self.addData(.string, .{ .string = token.literal.string });
+    } else if (self.match(.left_paren) != null) {
+        _ = try self.expression();
+        try self.addEmpty(.group);
+    }
 }
 
 fn match(self: *Self, token_tag: Scanner.TokenTag) ?Scanner.Token {
@@ -74,13 +102,23 @@ fn match(self: *Self, token_tag: Scanner.TokenTag) ?Scanner.Token {
     return null;
 }
 
-fn addTag(self: *Self, node_tag: Ast.NodeTag) !void {
-    try self.tags_list.append(self.allocator, node_tag);
+fn addEmpty(self: *Self, tag: Ast.NodeTag) !void {
+    try self.tags_list.append(self.allocator, tag);
 }
 
-fn addTagAndData(self: *Self, node_tag: Ast.NodeTag, data: Ast.Data) !void {
-    try self.addTag(node_tag);
+fn addData(self: *Self, tag: Ast.NodeTag, data: Ast.Data) !void {
+    try self.tags_list.append(self.allocator, tag);
+    errdefer _ = self.tags_list.pop();
     try self.data_list.append(self.allocator, data);
+}
+
+fn lastIndexes(self: Self) Ast.Data {
+    return .{
+        .lhs_reference = .{
+            .tag_index = @intCast(self.tags_list.items.len - 1),
+            .data_index = @intCast(@max(self.data_list.items.len, 1) - 1),
+        },
+    };
 }
 
 fn testParse(source: []const u8, parsed: []const u8) !void {
@@ -91,9 +129,7 @@ fn testParse(source: []const u8, parsed: []const u8) !void {
     var parser: Self = .{ .scanner = &scanner, .allocator = allocator };
     defer parser.deinit();
 
-    try parser.parse();
-
-    if (parser.ast().head()) |node| {
+    if (try parser.parse()) |node| {
         const actual = try std.fmt.allocPrint(allocator, "{s}", .{node});
         defer allocator.free(actual);
 
@@ -112,4 +148,8 @@ test "parse primary expressions" {
 
 test "parse unary expressions" {
     try testParse("!true", "(! true)");
+}
+
+test "parse binary expressions" {
+    try testParse("16 * 38 / 58", "(/ (* 16.0 38.0) 58.0)");
 }

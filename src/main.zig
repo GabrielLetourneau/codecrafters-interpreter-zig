@@ -63,9 +63,7 @@ fn parse(scanner: *Scanner, allocator: std.mem.Allocator) !void {
     var parser: Parser = .{ .scanner = scanner, .allocator = allocator };
     defer parser.deinit();
 
-    try parser.parse();
-
-    if (parser.ast().head()) |head_node| {
+    if (try parser.parse()) |head_node| {
         const out = std.io.getStdOut().writer();
         try out.print("{s}\n", .{head_node});
     }
