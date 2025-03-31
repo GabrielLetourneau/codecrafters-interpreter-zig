@@ -87,7 +87,11 @@ pub const Node = struct {
     }
 
     fn rhs(self: Self) Self {
-        return .{ .ast = self.ast, .tag_index = self.tag_index - 1, .data_index = self.data_index - 1 };
+        return .{
+            .ast = self.ast,
+            .tag_index = self.tag_index - 1,
+            .data_index = self.data_index - 1,
+        };
     }
 };
 
