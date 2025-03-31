@@ -31,7 +31,27 @@ pub fn parse(self: *Self) !?Ast.Node {
 }
 
 fn expression(self: *Self) std.mem.Allocator.Error!void {
+    try self.term();
+}
+
+fn term(self: *Self) !void {
     try self.factor();
+
+    var lhs_reference = self.lastIndexes();
+
+    while (true) {
+        const tag: Ast.NodeTag = blk: {
+            if (self.match(.plus) != null) break :blk .add;
+            if (self.match(.minus) != null) break :blk .substract;
+            return;
+        };
+
+        try self.factor();
+
+        try self.addData(tag, lhs_reference);
+
+        lhs_reference = self.lastIndexes();
+    }
 }
 
 fn factor(self: *Self) !void {
@@ -152,4 +172,5 @@ test "parse unary expressions" {
 
 test "parse binary expressions" {
     try testParse("16 * 38 / 58", "(/ (* 16.0 38.0) 58.0)");
+    try testParse("52 + 80 - 94", "(- (+ 52.0 80.0) 94.0)");
 }

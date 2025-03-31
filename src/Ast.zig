@@ -18,6 +18,8 @@ pub const NodeTag = enum(u8) {
     // Binary expressions
     multiply,
     divide,
+    add,
+    substract,
 };
 
 pub const Data = union {
@@ -50,6 +52,8 @@ pub const Node = struct {
             .unary_minus => try writer.print("(- {s})", .{self.onlyChild()}),
             .multiply => try writer.print("(* {s} {s})", .{ self.lhs(), self.rhs() }),
             .divide => try writer.print("(/ {s} {s})", .{ self.lhs(), self.rhs() }),
+            .add => try writer.print("(+ {s} {s})", .{ self.lhs(), self.rhs() }),
+            .substract => try writer.print("(- {s} {s})", .{ self.lhs(), self.rhs() }),
         }
     }
 
