@@ -31,7 +31,29 @@ pub fn parse(self: *Self) !?Ast.Node {
 }
 
 fn expression(self: *Self) std.mem.Allocator.Error!void {
+    try self.comparison();
+}
+
+fn comparison(self: *Self) !void {
     try self.term();
+
+    var lhs_reference = self.lastIndexes();
+
+    while (true) {
+        const tag: Ast.NodeTag = blk: {
+            if (self.match(.greater_than) != null) break :blk .greater_than;
+            if (self.match(.greater_than_equal) != null) break :blk .greater_than_equal;
+            if (self.match(.lower_than) != null) break :blk .lower_than;
+            if (self.match(.lower_than_equal) != null) break :blk .lower_than_equal;
+            return;
+        };
+
+        try self.term();
+
+        try self.addData(tag, lhs_reference);
+
+        lhs_reference = self.lastIndexes();
+    }
 }
 
 fn term(self: *Self) !void {
