@@ -63,6 +63,17 @@ const Runtime = struct {
             .number => try self.pushData(.number, .{ .number = self.ast.node(op_index).data().number }),
             .string => try self.pushData(.string, .{ .string = self.ast.node(op_index).data().index }),
             .group => {},
+            .not => {
+                const result: ValueTag = switch (self.popValue()) {
+                    .nil, .false => .true,
+                    else => .false,
+                };
+                try self.pushEmpty(result);
+            },
+            .unary_minus => {
+                const argument = self.popValue().number;
+                try self.pushData(.number, .{ .number = -argument });
+            },
             else => {},
         };
 
@@ -115,4 +126,12 @@ test "evaluate literals" {
     try testEvaluate("\"hello world!\"", "hello world!");
     try testEvaluate("10.40", "10.4");
     try testEvaluate("10", "10");
+}
+
+test "evaluate unary expression" {
+    try testEvaluate("(\"hello world!\")", "hello world!");
+    try testEvaluate("-73", "-73");
+    try testEvaluate("!true", "false");
+    try testEvaluate("!10.40", "false");
+    try testEvaluate("!((false))", "true");
 }
