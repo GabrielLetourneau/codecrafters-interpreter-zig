@@ -64,11 +64,7 @@ pub const Token = struct {
         try writer.print(" {s} ", .{self.lexeme});
         switch (self.tag) {
             .string => try writer.writeAll(self.literal.string),
-            .number => {
-                const literal_number = self.literal.number;
-                try writer.print("{d}", .{literal_number});
-                if (literal_number == @trunc(literal_number)) try writer.writeAll(".0");
-            },
+            .number => try @import("number.zig").format(self.literal.number, writer),
             else => try writer.writeAll("null"),
         }
     }

@@ -86,11 +86,7 @@ pub const Node = struct {
             .primary => try writer.writeAll(short_string),
             .unary => try writer.print("({s} {s})", .{ short_string, self.onlyChild() }),
             .literal => switch (tag) {
-                .number => {
-                    const literal_number = self.number();
-                    try writer.print("{d}", .{literal_number});
-                    if (literal_number == @trunc(literal_number)) try writer.writeAll(".0");
-                },
+                .number => try @import("number.zig").format(self.number(), writer),
                 .string => try writer.writeAll(self.string()),
                 else => unreachable,
             },
@@ -98,7 +94,7 @@ pub const Node = struct {
         }
     }
 
-    fn data(self: Self) Data {
+    pub fn data(self: Self) Data {
         return self.ast.data[self.index];
     }
 
@@ -111,11 +107,8 @@ pub const Node = struct {
     }
 
     fn string(self: Self) []const u8 {
-        const end_index = self.data().index;
-        const start =
-            if (end_index == 0) 0 else self.ast.string_ends[end_index - 1];
-        const end = self.ast.string_ends[end_index];
-        return self.ast.strings[start..end];
+        const index = self.data().index;
+        return self.ast.string(index);
     }
 
     fn leftChild(self: Self) Self {
@@ -133,6 +126,10 @@ pub const Node = struct {
     }
 };
 
+pub fn node(self: Ast, index: usize) Node {
+    return .{ .ast = self, .index = index };
+}
+
 pub fn root(self: Ast) ?Node {
     if (self.tags.len == 0) return null;
 
@@ -140,4 +137,11 @@ pub fn root(self: Ast) ?Node {
         .ast = self,
         .index = self.tags.len - 1,
     };
+}
+
+pub fn string(self: Ast, index: usize) []const u8 {
+    const start =
+        if (index == 0) 0 else self.string_ends[index - 1];
+    const end = self.string_ends[index];
+    return self.strings[start..end];
 }
