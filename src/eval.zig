@@ -79,6 +79,9 @@ const Runtime = struct {
 
             .multiply => try self.binary(.number, multiply),
             .divide => try self.binary(.number, divide),
+            .add => try self.binary(.number, add),
+            .substract => try self.binary(.number, substract),
+
             else => {},
         };
 
@@ -98,6 +101,14 @@ const Runtime = struct {
 
     fn divide(_: *Self, left: Value, right: Value) Data {
         return .{ .number = left.number / right.number };
+    }
+
+    fn add(_: *Self, left: Value, right: Value) Data {
+        return .{ .number = left.number + right.number };
+    }
+
+    fn substract(_: *Self, left: Value, right: Value) Data {
+        return .{ .number = left.number - right.number };
     }
 
     fn pushEmpty(self: *Self, tag: ValueTag) !void {
@@ -160,4 +171,8 @@ test "evaluate binary expressions" {
     try testEvaluate("42 / 5", "8.4");
     try testEvaluate("18 * 3 / (3 * 6)", "3");
     try testEvaluate("(10.40 * 2) / 2", "10.4");
+    try testEvaluate("70 - 65", "5");
+    try testEvaluate("69 - 93", "-24");
+    try testEvaluate("10.40 - 2", "8.4");
+    try testEvaluate("23 + 28 - (-(61 - 99))", "13");
 }
