@@ -1,0 +1,222 @@
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+const Ast = @import("Ast.zig");
+const Scanner = @import("Scanner.zig");
+
+pub fn parse(allocator: Allocator, file_contents: []const u8) !Ast {
+    var parser: Parser = .{
+        .scanner = .{ .source = file_contents },
+        .allocator = allocator,
+    };
+    defer parser.end_index_of_strings.deinit(allocator);
+    errdefer {
+        parser.string_buffer.deinit(allocator);
+        parser.data_list.deinit(allocator);
+        parser.tags_list.deinit(allocator);
+    }
+
+    try parser.expression();
+
+    const tags = try parser.tags_list.toOwnedSlice(allocator);
+    errdefer allocator.free(tags);
+
+    const data = try parser.data_list.toOwnedSlice(allocator);
+    errdefer allocator.free(data);
+
+    const string_ends = try parser.string_ends_list.toOwnedSlice(allocator);
+    errdefer allocator.free(string_ends);
+
+    const strings = try parser.string_buffer.toOwnedSlice(allocator);
+
+    return .{
+        .tags = tags,
+        .data = data,
+        .string_ends = string_ends,
+        .strings = strings,
+    };
+}
+
+const Parser = struct {
+    scanner: Scanner,
+    allocator: Allocator,
+    tags_list: std.ArrayListUnmanaged(Ast.NodeTag) = .{},
+    data_list: std.ArrayListUnmanaged(Ast.Data) = .{},
+    string_ends_list: std.ArrayListUnmanaged(usize) = .{},
+    string_buffer: std.ArrayListUnmanaged(u8) = .{},
+    end_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
+    next_token: ?Scanner.Token = null,
+
+    const Self = @This();
+
+    fn expression(self: *Self) error{ OutOfMemory, Syntax }!void {
+        try self.equality();
+    }
+
+    fn equality(self: *Self) !void {
+        return self.binary(comparison, &.{
+            .{ .token_tag = .equal_equal, .node_tag = .equal },
+            .{ .token_tag = .bang_equal, .node_tag = .not_equal },
+        });
+    }
+
+    fn comparison(self: *Self) !void {
+        return self.binary(term, &.{
+            .{ .token_tag = .greater, .node_tag = .greater },
+            .{ .token_tag = .greater_equal, .node_tag = .greater_equal },
+            .{ .token_tag = .less, .node_tag = .less },
+            .{ .token_tag = .less_equal, .node_tag = .less_equal },
+        });
+    }
+
+    fn term(self: *Self) !void {
+        return self.binary(factor, &.{
+            .{ .token_tag = .plus, .node_tag = .add },
+            .{ .token_tag = .minus, .node_tag = .substract },
+        });
+    }
+
+    fn factor(self: *Self) !void {
+        return self.binary(unary, &.{
+            .{ .token_tag = .star, .node_tag = .multiply },
+            .{ .token_tag = .slash, .node_tag = .divide },
+        });
+    }
+
+    fn binary(
+        self: *Self,
+        constituent: fn (*Self) error{ OutOfMemory, Syntax }!void,
+        comptime tag_mappings: []const struct { token_tag: Scanner.TokenTag, node_tag: Ast.NodeTag },
+    ) error{ OutOfMemory, Syntax }!void {
+        try constituent(self);
+        var leftChildIndex = self.tags_list.items.len - 1;
+
+        while (true) {
+            const tag: Ast.NodeTag = blk: {
+                inline for (tag_mappings) |tag_mapping|
+                    if (self.match(tag_mapping.token_tag) != null) break :blk tag_mapping.node_tag;
+                return;
+            };
+
+            try constituent(self);
+            try self.addData(tag, .{ .index = leftChildIndex });
+            leftChildIndex = self.tags_list.items.len - 1;
+        }
+    }
+
+    fn unary(self: *Self) !void {
+        const tag: Ast.NodeTag = blk: {
+            if (self.match(.bang) != null) break :blk .not;
+            if (self.match(.minus) != null) break :blk .unary_minus;
+
+            try self.primary();
+            return;
+        };
+
+        try self.unary();
+
+        try self.addEmpty(tag);
+    }
+
+    fn primary(self: *Self) !void {
+        if (self.match(.nil) != null) {
+            try self.addEmpty(.nil);
+        } else if (self.match(.true) != null) {
+            try self.addEmpty(.true);
+        } else if (self.match(.false) != null) {
+            try self.addEmpty(.false);
+        } else if (self.match(.number)) |token| {
+            try self.addData(.number, .{ .number = token.literal.number });
+        } else if (self.match(.string)) |token| {
+            const string = token.literal.string;
+            const end_index_result = try self.end_index_of_strings.getOrPut(self.allocator, string);
+            if (!end_index_result.found_existing) {
+                const start = self.string_buffer.items.len;
+                try self.string_buffer.appendSlice(self.allocator, string);
+
+                const end = self.string_buffer.items.len;
+                try self.string_ends_list.append(self.allocator, end);
+
+                end_index_result.key_ptr.* = self.string_buffer.items[start..];
+                end_index_result.value_ptr.* = self.string_ends_list.items.len - 1;
+            }
+            const string_index = end_index_result.value_ptr.*;
+            try self.addData(.string, .{ .index = string_index });
+        } else if (self.match(.left_paren) != null) {
+            try self.expression();
+
+            if (self.match(.right_paren) == null)
+                return error.Syntax;
+
+            try self.addEmpty(.group);
+        } else return error.Syntax;
+    }
+
+    fn match(self: *Self, token_tag: Scanner.TokenTag) ?Scanner.Token {
+        const token = blk: while (true) {
+            if (self.next_token) |token|
+                break :blk token;
+            if (self.scanner.next()) |result| {
+                switch (result) {
+                    .token => |scanned_token| self.next_token = scanned_token,
+                    .@"error" => {},
+                }
+            } else return null;
+        };
+
+        if (token.tag == token_tag) {
+            self.next_token = null;
+            return token;
+        }
+        return null;
+    }
+
+    fn addEmpty(self: *Self, tag: Ast.NodeTag) !void {
+        try self.addData(tag, .{ .empty = {} });
+    }
+
+    fn addData(self: *Self, tag: Ast.NodeTag, data: Ast.Data) !void {
+        try self.tags_list.append(self.allocator, tag);
+        try self.data_list.append(self.allocator, data);
+    }
+};
+
+fn testParse(source: []const u8, parsed: []const u8) !void {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const ast = try parse(allocator, source);
+    defer ast.deinit(allocator);
+
+    if (ast.root()) |node| {
+        const actual = try std.fmt.allocPrint(allocator, "{s}", .{node});
+        defer allocator.free(actual);
+
+        try testing.expectEqualStrings(parsed, actual);
+    } else try testing.expect(false);
+}
+
+test "parse primary expressions" {
+    try testParse("nil", "nil");
+    try testParse("true", "true");
+    try testParse("false", "false");
+    try testParse("42.47", "42.47");
+    try testParse("\"hello\"", "hello");
+    try testParse("(\"foo\")", "(group foo)");
+}
+
+test "parse unary expressions" {
+    try testParse("!true", "(! true)");
+}
+
+test "parse binary expressions" {
+    try testParse("16 * 38 / 58", "(/ (* 16.0 38.0) 58.0)");
+    try testParse("52 + 80 - 94", "(- (+ 52.0 80.0) 94.0)");
+    try testParse("(-92 + 90) * (60 * 99) / (39 + 51)", "(/ (* (group (+ (- 92.0) 90.0)) (group (* 60.0 99.0))) (group (+ 39.0 51.0)))");
+    try testParse("83 < 99 < 115", "(< (< 83.0 99.0) 115.0)");
+    try testParse("\"baz\" == \"baz\"", "(== baz baz)");
+}
+
+test "syntax error" {
+    try std.testing.expectError(error.Syntax, testParse("(72 +)", ""));
+}

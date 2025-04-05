@@ -1,22 +1,24 @@
 const std = @import("std");
 
+pub const NodeShape = enum { primary, unary, literal, binary };
+
 pub const NodeTag = enum(u8) {
     // Primary expressions, no data
     nil,
     true,
     false,
 
-    // Primary expressions, with data
-    number,
-    string,
-
     // Unary expressions, no data
-    group,
+    group = 0x10,
     not,
     unary_minus,
 
+    // Literal expressions
+    number = 0x20,
+    string,
+
     // Binary expressions
-    multiply,
+    multiply = 0x30,
     divide,
     add,
     substract,
@@ -26,74 +28,116 @@ pub const NodeTag = enum(u8) {
     less_equal,
     equal,
     not_equal,
+
+    const Self = @This();
+
+    fn shape(self: Self) NodeShape {
+        return @enumFromInt(@intFromEnum(self) >> 4);
+    }
+
+    fn shortString(self: Self) []const u8 {
+        return switch (self) {
+            .not => "!",
+            .unary_minus, .substract => "-",
+            .multiply => "*",
+            .divide => "/",
+            .add => "+",
+            .greater => ">",
+            .greater_equal => ">=",
+            .less => "<",
+            .less_equal => "<=",
+            .equal => "==",
+            .not_equal => "!=",
+            else => @tagName(self),
+        };
+    }
 };
 
 pub const Data = union {
+    empty: void,
+    index: usize, // index to tags (left child of binary), or string_ends (string literal)
     number: f64,
-    string: []const u8,
-    lhs_reference: struct { tag_index: u32, data_index: u32 },
 };
+
+tags: []const NodeTag, // whole tree, in postfix order
+data: []const Data, // relevant data in same order as tags
+string_ends: []const usize, // pointer to end of string; start of string is preceding entry
+strings: []const u8, // internalized strings
 
 const Ast = @This();
 
+pub fn deinit(self: Ast, allocator: std.mem.Allocator) void {
+    allocator.free(self.strings);
+    allocator.free(self.string_ends);
+    allocator.free(self.data);
+    allocator.free(self.tags);
+}
+
 pub const Node = struct {
     ast: Ast,
-    tag_index: u32,
-    data_index: u32,
+    index: usize,
 
     const Self = @This();
 
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        const tag = self.ast.tags[self.tag_index];
-        switch (tag) {
-            .nil, .true, .false => try writer.writeAll(@tagName(tag)),
-            .number => {
-                const literal_number = self.ast.data[self.data_index].number;
-                try writer.print("{d}", .{literal_number});
-                if (literal_number == @trunc(literal_number)) try writer.writeAll(".0");
+        const tag = self.ast.tags[self.index];
+        const short_string = tag.shortString();
+        switch (tag.shape()) {
+            .primary => try writer.writeAll(short_string),
+            .unary => try writer.print("({s} {s})", .{ short_string, self.onlyChild() }),
+            .literal => switch (tag) {
+                .number => {
+                    const literal_number = self.number();
+                    try writer.print("{d}", .{literal_number});
+                    if (literal_number == @trunc(literal_number)) try writer.writeAll(".0");
+                },
+                .string => try writer.writeAll(self.string()),
+                else => unreachable,
             },
-            .string => try writer.writeAll(self.ast.data[self.data_index].string),
-            .group => try writer.print("(group {s})", .{self.onlyChild()}),
-            .not => try writer.print("(! {s})", .{self.onlyChild()}),
-            .unary_minus => try writer.print("(- {s})", .{self.onlyChild()}),
-            .multiply => try writer.print("(* {s} {s})", .{ self.lhs(), self.rhs() }),
-            .divide => try writer.print("(/ {s} {s})", .{ self.lhs(), self.rhs() }),
-            .add => try writer.print("(+ {s} {s})", .{ self.lhs(), self.rhs() }),
-            .substract => try writer.print("(- {s} {s})", .{ self.lhs(), self.rhs() }),
-            .greater => try writer.print("(> {s} {s})", .{ self.lhs(), self.rhs() }),
-            .greater_equal => try writer.print("(>= {s} {s})", .{ self.lhs(), self.rhs() }),
-            .less => try writer.print("(< {s} {s})", .{ self.lhs(), self.rhs() }),
-            .less_equal => try writer.print("(<= {s} {s})", .{ self.lhs(), self.rhs() }),
-            .equal => try writer.print("(== {s} {s})", .{ self.lhs(), self.rhs() }),
-            .not_equal => try writer.print("(!= {s} {s})", .{ self.lhs(), self.rhs() }),
+            .binary => try writer.print("({s} {s} {s})", .{ short_string, self.leftChild(), self.rightChild() }),
         }
     }
 
+    fn data(self: Self) Data {
+        return self.ast.data[self.index];
+    }
+
     fn onlyChild(self: Self) Self {
+        return self.rightChild();
+    }
+
+    fn number(self: Self) f64 {
+        return self.data().number;
+    }
+
+    fn string(self: Self) []const u8 {
+        const end_index = self.data().index;
+        const start =
+            if (end_index == 0) 0 else self.ast.string_ends[end_index - 1];
+        const end = self.ast.string_ends[end_index];
+        return self.ast.strings[start..end];
+    }
+
+    fn leftChild(self: Self) Self {
         return .{
             .ast = self.ast,
-            .tag_index = self.tag_index - 1,
-            .data_index = self.data_index,
+            .index = self.data().index,
         };
     }
 
-    fn lhs(self: Self) Self {
-        const lhs_reference = self.ast.data[self.data_index].lhs_reference;
+    fn rightChild(self: Self) Self {
         return .{
             .ast = self.ast,
-            .tag_index = lhs_reference.tag_index,
-            .data_index = lhs_reference.data_index,
-        };
-    }
-
-    fn rhs(self: Self) Self {
-        return .{
-            .ast = self.ast,
-            .tag_index = self.tag_index - 1,
-            .data_index = self.data_index - 1,
+            .index = self.index - 1,
         };
     }
 };
 
-tags: []const NodeTag,
-data: []const Data,
+pub fn root(self: Ast) ?Node {
+    if (self.tags.len == 0) return null;
+
+    return .{
+        .ast = self,
+        .index = self.tags.len - 1,
+    };
+}
