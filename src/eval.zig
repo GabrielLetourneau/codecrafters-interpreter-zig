@@ -60,8 +60,7 @@ const Runtime = struct {
             .nil => try self.pushEmpty(.nil),
             .true => try self.pushEmpty(.true),
             .false => try self.pushEmpty(.false),
-            .number => try self.pushData(.number, .{ .number = self.ast.node(op_index).data().number }),
-            .string => try self.pushData(.string, .{ .string = self.ast.node(op_index).data().index }),
+
             .group => {},
             .not => {
                 const result: ValueTag = switch (self.popValue()) {
@@ -74,10 +73,31 @@ const Runtime = struct {
                 const argument = self.popValue().number;
                 try self.pushData(.number, .{ .number = -argument });
             },
+
+            .number => try self.pushData(.number, .{ .number = self.ast.node(op_index).data().number }),
+            .string => try self.pushData(.string, .{ .string = self.ast.node(op_index).data().index }),
+
+            .multiply => try self.binary(.number, multiply),
+            .divide => try self.binary(.number, divide),
             else => {},
         };
 
         return self.popValue();
+    }
+
+    fn binary(self: *Self, tag: ValueTag, operator: fn (*Self, Value, Value) Data) !void {
+        const right = self.popValue();
+        const left = self.popValue();
+        const result = operator(self, left, right);
+        try self.pushData(tag, result);
+    }
+
+    fn multiply(_: *Self, left: Value, right: Value) Data {
+        return .{ .number = left.number * right.number };
+    }
+
+    fn divide(_: *Self, left: Value, right: Value) Data {
+        return .{ .number = left.number / right.number };
     }
 
     fn pushEmpty(self: *Self, tag: ValueTag) !void {
@@ -128,10 +148,16 @@ test "evaluate literals" {
     try testEvaluate("10", "10");
 }
 
-test "evaluate unary expression" {
+test "evaluate unary expressions" {
     try testEvaluate("(\"hello world!\")", "hello world!");
     try testEvaluate("-73", "-73");
     try testEvaluate("!true", "false");
     try testEvaluate("!10.40", "false");
     try testEvaluate("!((false))", "true");
+}
+
+test "evaluate binary expressions" {
+    try testEvaluate("42 / 5", "8.4");
+    try testEvaluate("18 * 3 / (3 * 6)", "3");
+    try testEvaluate("(10.40 * 2) / 2", "10.4");
 }
