@@ -62,6 +62,7 @@ const Runtime = struct {
             .false => try self.pushEmpty(.false),
             .number => try self.pushData(.number, .{ .number = self.ast.node(op_index).data().number }),
             .string => try self.pushData(.string, .{ .string = self.ast.node(op_index).data().index }),
+            .grouping => {},
             else => {},
         };
 
