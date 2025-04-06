@@ -96,7 +96,13 @@ fn evaluate(file_contents: []const u8, allocator: Allocator) !void {
     var runtime: Runtime = Runtime.init(allocator, ast);
     defer runtime.deinit();
 
-    const value = try runtime.evaluate();
+    const value = runtime.evaluate() catch |err| switch (err) {
+        error.Semantics => {
+            try std.io.getStdErr().writer().writeAll("Semantics error\n");
+            std.process.exit(70);
+        },
+        else => return,
+    };
 
     const out = std.io.getStdOut().writer();
     try out.print("{s}\n", .{value});

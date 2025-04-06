@@ -91,7 +91,7 @@ pub fn evaluate(self: *Self) !RuntimeValue {
         },
         .unary_minus => {
             self.popValue();
-            const result = -self.right.?.number;
+            const result = -(try self.rightNumber());
             try self.pushData(.number, .{ .number = result });
         },
 
@@ -126,6 +126,26 @@ fn pushData(self: *Self, tag: ValueTag, data: StackData) !void {
     if (tag == .object) {
         data.object.*.ref_count += 1;
     }
+}
+
+fn leftNumber(self: Self) !f64 {
+    if (self.left) |value|
+        switch (value) {
+            .number => |number| return number,
+            else => {},
+        };
+
+    return error.Semantics;
+}
+
+fn rightNumber(self: Self) !f64 {
+    if (self.right) |value|
+        switch (value) {
+            .number => |number| return number,
+            else => {},
+        };
+
+    return error.Semantics;
 }
 
 fn freeArguments(self: *Self) void {
@@ -340,4 +360,14 @@ test "evaluate binary expressions" {
     try testEvaluate("(54 - 67) >= -(114 / 57 + 11)", "true");
     try testEvaluate("\"hello\" == \"world\"", "false");
     try testEvaluate("nil != false", "true");
+}
+
+fn testSemanticsError(source: []const u8) !void {
+    const result = testEvaluate(source, "");
+    try std.testing.expectError(error.Semantics, result);
+}
+
+test "semantics errors" {
+    try testSemanticsError("-\"foo\"");
+    try testSemanticsError("-(\"hello\" + \" world!\")");
 }
