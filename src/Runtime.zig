@@ -195,23 +195,23 @@ fn popValue(self: *Self) void {
     } else self.left = value;
 }
 
-fn binary(self: *Self, operator: fn (*Self) error{OutOfMemory}!void) !void {
+fn binary(self: *Self, operator: fn (*Self) error{ OutOfMemory, Semantics }!void) !void {
     self.popValue();
     self.popValue();
     try operator(self);
 }
 
 fn multiply(self: *Self) !void {
-    try self.pushData(.number, .{ .number = self.left.?.number * self.right.?.number });
+    try self.pushData(.number, .{ .number = try self.leftNumber() * try self.rightNumber() });
 }
 
 fn divide(self: *Self) !void {
-    try self.pushData(.number, .{ .number = self.left.?.number / self.right.?.number });
+    try self.pushData(.number, .{ .number = try self.leftNumber() / try self.rightNumber() });
 }
 
 fn add(self: *Self) !void {
     switch (self.left.?) {
-        .number => |number| try self.pushData(.number, .{ .number = number + self.right.?.number }),
+        .number => |number| try self.pushData(.number, .{ .number = number + try self.rightNumber() }),
         .string, .object => {
             const left_string = self.maybe_string(self.left.?) orelse return;
             const right_string = self.maybe_string(self.right.?) orelse return;
@@ -236,26 +236,26 @@ fn add(self: *Self) !void {
 }
 
 fn substract(self: *Self) !void {
-    try self.pushData(.number, .{ .number = self.left.?.number - self.right.?.number });
+    try self.pushData(.number, .{ .number = try self.leftNumber() - try self.rightNumber() });
 }
 
 fn greater(self: *Self) !void {
-    const result = self.left.?.number > self.right.?.number;
+    const result = try self.leftNumber() > try self.rightNumber();
     try self.pushEmpty(if (result) .true else .false);
 }
 
 fn greater_equal(self: *Self) !void {
-    const result = self.left.?.number >= self.right.?.number;
+    const result = try self.leftNumber() >= try self.rightNumber();
     try self.pushEmpty(if (result) .true else .false);
 }
 
 fn less(self: *Self) !void {
-    const result = self.left.?.number < self.right.?.number;
+    const result = try self.leftNumber() < try self.rightNumber();
     try self.pushEmpty(if (result) .true else .false);
 }
 
 fn less_equal(self: *Self) !void {
-    const result = self.left.?.number <= self.right.?.number;
+    const result = try self.leftNumber() <= try self.rightNumber();
     try self.pushEmpty(if (result) .true else .false);
 }
 
@@ -370,4 +370,6 @@ fn testSemanticsError(source: []const u8) !void {
 test "semantics errors" {
     try testSemanticsError("-\"foo\"");
     try testSemanticsError("-(\"hello\" + \" world!\")");
+    try testSemanticsError("\"foo\" * 42");
+    try testSemanticsError("true / 2");
 }
