@@ -213,8 +213,8 @@ fn add(self: *Self) !void {
     switch (self.left.?) {
         .number => |number| try self.pushData(.number, .{ .number = number + try self.rightNumber() }),
         .string, .object => {
-            const left_string = self.maybe_string(self.left.?) orelse return;
-            const right_string = self.maybe_string(self.right.?) orelse return;
+            const left_string = self.maybe_string(self.left.?) orelse return error.Semantics;
+            const right_string = self.maybe_string(self.right.?) orelse return error.Semantics;
 
             const string = try self.allocator.alloc(u8, left_string.len + right_string.len);
             errdefer self.allocator.free(string);
@@ -372,4 +372,5 @@ test "semantics errors" {
     try testSemanticsError("-(\"hello\" + \" world!\")");
     try testSemanticsError("\"foo\" * 42");
     try testSemanticsError("true / 2");
+    try testSemanticsError("\"quz\" + 2");
 }
