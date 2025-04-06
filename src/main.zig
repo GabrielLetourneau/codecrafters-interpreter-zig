@@ -3,7 +3,7 @@ const Allocator = std.mem.Allocator;
 
 const Scanner = @import("Scanner.zig");
 const parsing = @import("parsing.zig");
-const eval = @import("eval.zig");
+const Runtime = @import("Runtime.zig");
 
 pub fn main() !void {
     var gpa: std.heap.DebugAllocator(.{}) = .{};
@@ -93,7 +93,11 @@ fn evaluate(file_contents: []const u8, allocator: Allocator) !void {
     };
     defer ast.deinit(allocator);
 
-    const value = try eval.evaluate(allocator, ast);
+    var runtime: Runtime = Runtime.init(allocator, ast);
+    defer runtime.deinit();
+
+    const value = try runtime.evaluate();
+
     const out = std.io.getStdOut().writer();
     try out.print("{s}\n", .{value});
 }
