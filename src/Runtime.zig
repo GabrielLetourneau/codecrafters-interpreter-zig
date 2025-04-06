@@ -97,6 +97,10 @@ pub fn evaluate(self: *Self) !RuntimeValue {
         .divide => try self.binary(divide),
         .add => try self.binary(add),
         .substract => try self.binary(substract),
+        .greater => try self.binary(greater),
+        .greater_equal => try self.binary(greater_equal),
+        .less => try self.binary(less),
+        .less_equal => try self.binary(less_equal),
 
         else => {},
     };
@@ -156,6 +160,26 @@ fn add(self: *Self, left: Value, right: Value) !void {
         },
         else => {},
     }
+}
+
+fn greater(self: *Self, left: Value, right: Value) !void {
+    const result = left.number > right.number;
+    try self.pushEmpty(if (result) .true else .false);
+}
+
+fn greater_equal(self: *Self, left: Value, right: Value) !void {
+    const result = left.number >= right.number;
+    try self.pushEmpty(if (result) .true else .false);
+}
+
+fn less(self: *Self, left: Value, right: Value) !void {
+    const result = left.number < right.number;
+    try self.pushEmpty(if (result) .true else .false);
+}
+
+fn less_equal(self: *Self, left: Value, right: Value) !void {
+    const result = left.number <= right.number;
+    try self.pushEmpty(if (result) .true else .false);
 }
 
 fn substract(self: *Self, left: Value, right: Value) !void {
@@ -255,4 +279,6 @@ test "evaluate binary expressions" {
     try testEvaluate("10.40 - 2", "8.4");
     try testEvaluate("23 + 28 - (-(61 - 99))", "13");
     try testEvaluate("\"hello\" + \" world!\"", "hello world!");
+    try testEvaluate("57 > -65", "true");
+    try testEvaluate("(54 - 67) >= -(114 / 57 + 11)", "true");
 }
