@@ -12,6 +12,8 @@ pub const NodeTag = enum(u8) {
     group = 0x10,
     not,
     unary_minus,
+    discard,
+    print,
 
     // Literal expressions
     number = 0x20,
@@ -61,14 +63,14 @@ pub const Data = union {
 
 tags: []const NodeTag, // whole tree, in postfix order
 data: []const Data, // relevant data in same order as tags
-string_ends: []const usize, // pointer to end of string; start of string is preceding entry
+string_starts: []const usize, // pointer to start of string; end of string is followin entry
 strings: []const u8, // internalized strings
 
 const Ast = @This();
 
 pub fn deinit(self: Ast, allocator: std.mem.Allocator) void {
     allocator.free(self.strings);
-    allocator.free(self.string_ends);
+    allocator.free(self.string_starts);
     allocator.free(self.data);
     allocator.free(self.tags);
 }
@@ -94,21 +96,23 @@ pub const Node = struct {
         }
     }
 
-    pub fn data(self: Self) Data {
+    pub fn string(self: Self) []const u8 {
+        const index = self.data().index;
+        const start = self.ast.string_starts[index];
+        const end = self.ast.string_starts[index + 1];
+        return self.ast.strings[start..end];
+    }
+
+    pub fn number(self: Self) f64 {
+        return self.data().number;
+    }
+
+    fn data(self: Self) Data {
         return self.ast.data[self.index];
     }
 
     fn onlyChild(self: Self) Self {
         return self.rightChild();
-    }
-
-    fn number(self: Self) f64 {
-        return self.data().number;
-    }
-
-    fn string(self: Self) []const u8 {
-        const index = self.data().index;
-        return self.ast.string(index);
     }
 
     fn leftChild(self: Self) Self {
@@ -137,11 +141,4 @@ pub fn root(self: Ast) ?Node {
         .ast = self,
         .index = self.tags.len - 1,
     };
-}
-
-pub fn string(self: Ast, index: usize) []const u8 {
-    const start =
-        if (index == 0) 0 else self.string_ends[index - 1];
-    const end = self.string_ends[index];
-    return self.strings[start..end];
 }

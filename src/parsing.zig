@@ -4,19 +4,27 @@ const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig");
 const Scanner = @import("Scanner.zig");
 
-pub fn parse(allocator: Allocator, file_contents: []const u8) !Ast {
+pub const RootSymbol = enum { program, expression };
+
+pub fn parse(allocator: Allocator, file_contents: []const u8, root_symbol: RootSymbol) !Ast {
     var parser: Parser = .{
         .scanner = .{ .source = file_contents },
         .allocator = allocator,
     };
-    defer parser.end_index_of_strings.deinit(allocator);
+    defer parser.start_index_of_strings.deinit(allocator);
     errdefer {
         parser.string_buffer.deinit(allocator);
+        parser.string_indexes_list.deinit(allocator);
         parser.data_list.deinit(allocator);
         parser.tags_list.deinit(allocator);
     }
 
-    try parser.expression();
+    try parser.string_indexes_list.append(allocator, 0);
+
+    switch (root_symbol) {
+        .program => try parser.program(),
+        .expression => try parser.expression(),
+    }
 
     const tags = try parser.tags_list.toOwnedSlice(allocator);
     errdefer allocator.free(tags);
@@ -24,15 +32,15 @@ pub fn parse(allocator: Allocator, file_contents: []const u8) !Ast {
     const data = try parser.data_list.toOwnedSlice(allocator);
     errdefer allocator.free(data);
 
-    const string_ends = try parser.string_ends_list.toOwnedSlice(allocator);
-    errdefer allocator.free(string_ends);
+    const string_starts = try parser.string_indexes_list.toOwnedSlice(allocator);
+    errdefer allocator.free(string_starts);
 
     const strings = try parser.string_buffer.toOwnedSlice(allocator);
 
     return .{
         .tags = tags,
         .data = data,
-        .string_ends = string_ends,
+        .string_starts = string_starts,
         .strings = strings,
     };
 }
@@ -42,12 +50,29 @@ const Parser = struct {
     allocator: Allocator,
     tags_list: std.ArrayListUnmanaged(Ast.NodeTag) = .{},
     data_list: std.ArrayListUnmanaged(Ast.Data) = .{},
-    string_ends_list: std.ArrayListUnmanaged(usize) = .{},
+    string_indexes_list: std.ArrayListUnmanaged(usize) = .{},
     string_buffer: std.ArrayListUnmanaged(u8) = .{},
-    end_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
+    start_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
     next_token: ?Scanner.Token = null,
 
     const Self = @This();
+
+    fn program(self: *Self) !void {
+        while (self.nextToken()) |_| {
+            try self.statement();
+        }
+    }
+
+    fn statement(self: *Self) !void {
+        const tag: Ast.NodeTag =
+            if (self.match(.print)) |_| .print else .discard;
+
+        try self.expression();
+
+        if (self.match(.semicolon) == null) return error.Syntax;
+
+        try self.addEmpty(tag);
+    }
 
     fn expression(self: *Self) error{ OutOfMemory, Syntax }!void {
         try self.equality();
@@ -129,18 +154,18 @@ const Parser = struct {
             try self.addData(.number, .{ .number = token.literal.number });
         } else if (self.match(.string)) |token| {
             const string = token.literal.string;
-            const end_index_result = try self.end_index_of_strings.getOrPut(self.allocator, string);
-            if (!end_index_result.found_existing) {
+            const start_index_result = try self.start_index_of_strings.getOrPut(self.allocator, string);
+            if (!start_index_result.found_existing) {
                 const start = self.string_buffer.items.len;
                 try self.string_buffer.appendSlice(self.allocator, string);
-
                 const end = self.string_buffer.items.len;
-                try self.string_ends_list.append(self.allocator, end);
 
-                end_index_result.key_ptr.* = self.string_buffer.items[start..];
-                end_index_result.value_ptr.* = self.string_ends_list.items.len - 1;
+                start_index_result.key_ptr.* = self.string_buffer.items[start..];
+                start_index_result.value_ptr.* = self.string_indexes_list.items.len - 1;
+
+                try self.string_indexes_list.append(self.allocator, end);
             }
-            const string_index = end_index_result.value_ptr.*;
+            const string_index = start_index_result.value_ptr.*;
             try self.addData(.string, .{ .index = string_index });
         } else if (self.match(.left_paren) != null) {
             try self.expression();
@@ -153,22 +178,26 @@ const Parser = struct {
     }
 
     fn match(self: *Self, token_tag: Scanner.TokenTag) ?Scanner.Token {
-        const token = blk: while (true) {
-            if (self.next_token) |token|
-                break :blk token;
-            if (self.scanner.next()) |result| {
-                switch (result) {
-                    .token => |scanned_token| self.next_token = scanned_token,
-                    .@"error" => {},
-                }
-            } else return null;
-        };
+        const token = self.nextToken() orelse return null;
 
         if (token.tag == token_tag) {
             self.next_token = null;
             return token;
         }
         return null;
+    }
+
+    fn nextToken(self: *Self) ?Scanner.Token {
+        while (true) {
+            if (self.next_token) |token|
+                return token;
+            if (self.scanner.next()) |result| {
+                switch (result) {
+                    .token => |scanned_token| self.next_token = scanned_token,
+                    .@"error" => {},
+                }
+            } else return null;
+        }
     }
 
     fn addEmpty(self: *Self, tag: Ast.NodeTag) !void {
@@ -185,7 +214,7 @@ fn testParse(source: []const u8, parsed: []const u8) !void {
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    const ast = try parse(allocator, source);
+    const ast = try parse(allocator, source, .expression);
     defer ast.deinit(allocator);
 
     if (ast.root()) |node| {

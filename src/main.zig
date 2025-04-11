@@ -2,6 +2,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const Scanner = @import("Scanner.zig");
+const Ast = @import("Ast.zig");
 const parsing = @import("parsing.zig");
 const Runtime = @import("Runtime.zig");
 
@@ -32,18 +33,20 @@ pub fn main() !void {
 
         break :blk .{ command_tag, file_contents };
     };
-    defer allocator.free(file_contents);
 
     switch (command_tag) {
-        .tokenize => try scan(file_contents),
-        .parse => try parse(file_contents, allocator),
-        .evaluate => try evaluate(file_contents, allocator),
+        .tokenize => try scan(allocator, file_contents),
+        .parse => try parse(allocator, file_contents),
+        .evaluate => try evaluate(allocator, file_contents),
+        .run => try run(allocator, file_contents),
     }
 }
 
-const CommandTag = enum { tokenize, parse, evaluate };
+const CommandTag = enum { tokenize, parse, evaluate, run };
 
-fn scan(file_contents: []const u8) !void {
+fn scan(allocator: Allocator, file_contents: []const u8) !void {
+    defer allocator.free(file_contents);
+
     var scanner: Scanner = .{ .source = file_contents };
 
     var has_errors = false;
@@ -67,14 +70,19 @@ fn scan(file_contents: []const u8) !void {
         std.process.exit(65);
 }
 
-fn parse(file_contents: []const u8, allocator: Allocator) !void {
-    const ast = parsing.parse(allocator, file_contents) catch |err| switch (err) {
+fn parse_or_exit(allocator: Allocator, file_contents: []const u8, root_symbol: parsing.RootSymbol) !Ast {
+    defer allocator.free(file_contents);
+    return parsing.parse(allocator, file_contents, root_symbol) catch |err| switch (err) {
         error.Syntax => {
             try std.io.getStdErr().writer().writeAll("Syntax error\n");
             std.process.exit(65);
         },
-        else => return,
+        else => return err,
     };
+}
+
+fn parse(allocator: Allocator, file_contents: []const u8) !void {
+    const ast = try parse_or_exit(allocator, file_contents, .expression);
     defer ast.deinit(allocator);
 
     if (ast.root()) |head_node| {
@@ -83,17 +91,11 @@ fn parse(file_contents: []const u8, allocator: Allocator) !void {
     }
 }
 
-fn evaluate(file_contents: []const u8, allocator: Allocator) !void {
-    const ast = parsing.parse(allocator, file_contents) catch |err| switch (err) {
-        error.Syntax => {
-            try std.io.getStdErr().writer().writeAll("Syntax error\n");
-            std.process.exit(65);
-        },
-        else => return,
-    };
+fn evaluate(allocator: Allocator, file_contents: []const u8) !void {
+    const ast = try parse_or_exit(allocator, file_contents, .expression);
     defer ast.deinit(allocator);
 
-    var runtime: Runtime = Runtime.init(allocator, ast);
+    var runtime: Runtime = Runtime.init(allocator, ast, undefined);
     defer runtime.deinit();
 
     const value = runtime.evaluate() catch |err| switch (err) {
@@ -106,4 +108,22 @@ fn evaluate(file_contents: []const u8, allocator: Allocator) !void {
 
     const out = std.io.getStdOut().writer();
     try out.print("{s}\n", .{value});
+}
+
+fn run(allocator: Allocator, file_contents: []const u8) !void {
+    const ast = try parse_or_exit(allocator, file_contents, .program);
+    defer ast.deinit(allocator);
+
+    const out = std.io.getStdOut().writer().any();
+
+    var runtime: Runtime = Runtime.init(allocator, ast, out);
+    defer runtime.deinit();
+
+    runtime.run() catch |err| switch (err) {
+        error.Semantics => {
+            try std.io.getStdErr().writer().writeAll("Semantics error\n");
+            std.process.exit(70);
+        },
+        else => return,
+    };
 }

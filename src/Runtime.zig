@@ -1,48 +1,62 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Writer = std.io.AnyWriter;
 
 const Ast = @import("Ast.zig");
 
-pub const ValueTag = enum {
-    nil,
-    true,
-    false,
-    number,
-    string,
-    object,
-};
-
-pub const Value = union(ValueTag) {
+pub const Value = union(enum) {
     nil: void,
     true: void,
     false: void,
     number: f64,
-    string: usize,
-    object: *HeapObject,
-};
+    internal_string: []const u8,
+    heap_string: *HeapObject,
 
-pub const HeapObject = struct {
-    tag: HeapObjectTag,
-    ref_count: u32,
-    left: HeapData,
-    right: HeapData,
+    pub fn format(self: Value, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        switch (self) {
+            .nil, .true, .false => try writer.writeAll(@tagName(self)),
+            .number => |number| try writer.print("{d}", .{number}),
+            .internal_string, .heap_string => try writer.writeAll(self.string()),
+        }
+    }
 
-    fn string(self: *HeapObject) []const u8 {
-        return self.left.string_ptr[0..self.right.string_len];
+    fn string(self: Value) []const u8 {
+        return switch (self) {
+            .internal_string => |internal_string| internal_string,
+            .heap_string => |object| object.string(),
+            else => unreachable,
+        };
     }
 };
 
+const ValueTag = std.meta.Tag(Value);
+
 pub const HeapObjectTag = enum {
-    string,
+    string_buffer,
+    string_prefix,
 };
 
-pub const HeapData = union {
-    string_ptr: [*]const u8,
-    string_len: usize,
+pub const HeapObject = struct {
+    tag: std.meta.Tag(HeapData),
+    ref_count: u32,
+    data: HeapData,
+
+    fn string(self: HeapObject) []const u8 {
+        return switch (self.tag) {
+            .string_buffer => self.data.string_buffer,
+            .prefix => self.data.prefix.object.data.string_buffer[0..self.data.prefix.len],
+        };
+    }
 };
 
-ast: Ast,
+pub const HeapData = union(enum) {
+    string_buffer: []u8,
+    prefix: struct { object: *HeapObject, len: usize },
+};
+
 allocator: Allocator,
+ast: Ast,
+out: Writer,
 tags_stack: std.ArrayListUnmanaged(ValueTag),
 data_stack: std.ArrayListUnmanaged(StackData),
 heap: std.heap.MemoryPool(HeapObject),
@@ -53,14 +67,16 @@ const Self = @This();
 
 const StackData = union {
     number: f64,
-    string: usize,
+    string_ptr: [*]const u8,
+    string_len: usize,
     object: *HeapObject,
 };
 
-pub fn init(allocator: Allocator, ast: Ast) Self {
+pub fn init(allocator: Allocator, ast: Ast, out: Writer) Self {
     return .{
-        .ast = ast,
         .allocator = allocator,
+        .ast = ast,
+        .out = out,
         .tags_stack = .{},
         .data_stack = .{},
         .heap = std.heap.MemoryPool(HeapObject).init(allocator),
@@ -74,84 +90,92 @@ pub fn deinit(self: *Self) void {
     self.tags_stack.deinit(self.allocator);
 }
 
-pub fn evaluate(self: *Self) !RuntimeValue {
-    for (self.ast.tags, 0..) |op, op_index| switch (op) {
-        .nil => try self.pushEmpty(.nil),
-        .true => try self.pushEmpty(.true),
-        .false => try self.pushEmpty(.false),
+pub fn run(self: *Self) !void {
+    for (self.ast.tags, 0..) |op, op_index| {
+        defer self.freeArguments();
+        switch (op) {
+            .nil => try self.pushValue(.nil),
+            .true => try self.pushValue(.true),
+            .false => try self.pushValue(.false),
 
-        .group => {},
-        .not => {
-            self.popValue();
-            const result: ValueTag = switch (self.right.?) {
-                .nil, .false => .true,
-                else => .false,
-            };
-            try self.pushEmpty(result);
-        },
-        .unary_minus => {
-            self.popValue();
-            const result = -(try self.rightNumber());
-            try self.pushData(.number, .{ .number = result });
-        },
+            .group => {},
+            .not => {
+                self.popValue();
+                const result: Value = switch (self.right.?) {
+                    .nil, .false => .true,
+                    else => .false,
+                };
+                try self.pushValue(result);
+            },
+            .unary_minus => {
+                self.popValue();
+                const result = -(try self.rightNumber());
+                try self.pushValue(.{ .number = result });
+            },
+            .discard => self.popValue(),
+            .print => {
+                self.popValue();
+                try self.out.print("{s}\n", .{self.right.?});
+            },
 
-        .number => try self.pushData(.number, .{ .number = self.ast.node(op_index).data().number }),
-        .string => try self.pushData(.string, .{ .string = self.ast.node(op_index).data().index }),
+            .number => try self.pushValue(.{ .number = self.ast.node(op_index).number() }),
+            .string => try self.pushValue(.{ .internal_string = self.ast.node(op_index).string() }),
 
-        .multiply => try self.binary(multiply),
-        .divide => try self.binary(divide),
-        .add => try self.binary(add),
-        .substract => try self.binary(substract),
-        .greater => try self.binary(greater),
-        .greater_equal => try self.binary(greater_equal),
-        .less => try self.binary(less),
-        .less_equal => try self.binary(less_equal),
-        .equal => try self.binary(equal),
-        .not_equal => try self.binary(not_equal),
-    };
+            .multiply => try self.binary(multiply),
+            .divide => try self.binary(divide),
+            .add => try self.binary(add),
+            .substract => try self.binary(substract),
+            .greater => try self.binary(greater),
+            .greater_equal => try self.binary(greater_equal),
+            .less => try self.binary(less),
+            .less_equal => try self.binary(less_equal),
+            .equal => try self.binary(equal),
+            .not_equal => try self.binary(not_equal),
+        }
+    }
+}
+
+pub fn evaluate(self: *Self) !Value {
+    try self.run();
 
     self.popValue();
-    return .{ .runtime = self, .value = self.right.? };
+    return self.right.?;
 }
 
-fn pushEmpty(self: *Self, tag: ValueTag) !void {
-    defer self.freeArguments();
-    try self.tags_stack.append(self.allocator, tag);
-}
-
-fn pushData(self: *Self, tag: ValueTag, data: StackData) !void {
-    defer self.freeArguments();
-    try self.tags_stack.append(self.allocator, tag);
-    try self.data_stack.append(self.allocator, data);
-    if (tag == .object) {
-        data.object.*.ref_count += 1;
+fn pushValue(self: *Self, value: Value) !void {
+    try self.tags_stack.append(self.allocator, std.meta.activeTag(value));
+    switch (value) {
+        .nil, .true, .false => {},
+        .number => |number| try self.data_stack.append(self.allocator, .{ .number = number }),
+        .internal_string => |string| {
+            try self.data_stack.append(self.allocator, .{ .string_ptr = string.ptr });
+            try self.data_stack.append(self.allocator, .{ .string_len = string.len });
+        },
+        .heap_string => |object| {
+            try self.data_stack.append(self.allocator, .{ .object = object });
+            object.*.ref_count += 1;
+        },
     }
 }
 
 fn leftNumber(self: Self) !f64 {
-    if (self.left) |value|
-        switch (value) {
-            .number => |number| return number,
-            else => {},
-        };
-
-    return error.Semantics;
+    return switch (self.left.?) {
+        .number => |number| number,
+        else => error.Semantics,
+    };
 }
 
 fn rightNumber(self: Self) !f64 {
-    if (self.right) |value|
-        switch (value) {
-            .number => |number| return number,
-            else => {},
-        };
-
-    return error.Semantics;
+    return switch (self.right.?) {
+        .number => |number| number,
+        else => error.Semantics,
+    };
 }
 
 fn freeArguments(self: *Self) void {
     if (self.right) |value| {
         switch (value) {
-            .object => |object| {
+            .heap_string => |object| {
                 self.decrementRef(object);
             },
             else => {},
@@ -160,7 +184,7 @@ fn freeArguments(self: *Self) void {
     }
     if (self.left) |value| {
         switch (value) {
-            .object => |object| {
+            .heap_string => |object| {
                 self.decrementRef(object);
             },
             else => {},
@@ -173,7 +197,8 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
     object.*.ref_count -= 1;
     if (object.ref_count == 0) {
         switch (object.tag) {
-            .string => self.allocator.free(object.string()),
+            .string_buffer => self.allocator.free(object.data.string_buffer),
+            .prefix => self.decrementRef(object.data.prefix.object),
         }
 
         self.heap.destroy(object);
@@ -186,8 +211,12 @@ fn popValue(self: *Self) void {
         .true => .{ .true = {} },
         .false => .{ .false = {} },
         .number => .{ .number = self.data_stack.pop().?.number },
-        .string => .{ .string = self.data_stack.pop().?.string },
-        .object => .{ .object = self.data_stack.pop().?.object },
+        .internal_string => blk: {
+            const len = self.data_stack.pop().?.string_len;
+            const ptr = self.data_stack.pop().?.string_ptr;
+            break :blk .{ .internal_string = ptr[0..len] };
+        },
+        .heap_string => .{ .heap_string = self.data_stack.pop().?.object },
     };
 
     if (self.right == null) {
@@ -202,71 +231,98 @@ fn binary(self: *Self, operator: fn (*Self) error{ OutOfMemory, Semantics }!void
 }
 
 fn multiply(self: *Self) !void {
-    try self.pushData(.number, .{ .number = try self.leftNumber() * try self.rightNumber() });
+    try self.pushValue(.{ .number = try self.leftNumber() * try self.rightNumber() });
 }
 
 fn divide(self: *Self) !void {
-    try self.pushData(.number, .{ .number = try self.leftNumber() / try self.rightNumber() });
+    try self.pushValue(.{ .number = try self.leftNumber() / try self.rightNumber() });
 }
 
 fn add(self: *Self) !void {
-    switch (self.left.?) {
-        .number => |number| try self.pushData(.number, .{ .number = number + try self.rightNumber() }),
-        .string, .object => {
-            const left_string = self.maybe_string(self.left.?) orelse return error.Semantics;
-            const right_string = self.maybe_string(self.right.?) orelse return error.Semantics;
+    sw: switch (self.left.?) {
+        .number => |number| try self.pushValue(.{ .number = number + try self.rightNumber() }),
+        .internal_string => |left_string| {
+            const right_string = switch (self.right.?) {
+                .internal_string, .heap_string => self.right.?.string(),
+                else => return error.Semantics,
+            };
 
-            const string = try self.allocator.alloc(u8, left_string.len + right_string.len);
-            errdefer self.allocator.free(string);
+            const buffer = try self.allocator.alloc(u8, left_string.len + right_string.len);
+            errdefer self.allocator.free(buffer);
 
-            @memcpy(string[0..left_string.len], left_string);
-            @memcpy(string[left_string.len..], right_string);
+            @memcpy(buffer[0..left_string.len], left_string);
+            @memcpy(buffer[left_string.len..], right_string);
 
             const object = try self.heap.create();
             errdefer self.heap.destroy(object);
 
-            object.tag = .string;
+            object.tag = .string_buffer;
             object.ref_count = 0;
-            object.left = .{ .string_ptr = string.ptr };
-            object.right = .{ .string_len = string.len };
-            try self.pushData(.object, .{ .object = object });
+            object.data = .{ .string_buffer = buffer };
+            try self.pushValue(.{ .heap_string = object });
         },
-        else => {},
+        .heap_string => |left_object| {
+            var buffer = switch (left_object.tag) {
+                .prefix => continue :sw .{ .internal_string = left_object.string() },
+                .string_buffer => left_object.data.string_buffer,
+            };
+
+            const right_string = switch (self.right.?) {
+                .internal_string, .heap_string => self.right.?.string(),
+                else => return error.Semantics,
+            };
+
+            const left_len = buffer.len;
+            buffer = try self.allocator.realloc(buffer, left_len + right_string.len);
+            @memcpy(buffer[left_len..], right_string);
+
+            const object = try self.heap.create();
+            errdefer self.heap.destroy(object);
+
+            object.tag = .string_buffer;
+            object.ref_count = 1;
+            object.data = .{ .string_buffer = buffer };
+            try self.pushValue(.{ .heap_string = object });
+
+            left_object.tag = .prefix;
+            left_object.data = .{ .prefix = .{ .object = object, .len = left_len } };
+        },
+        else => return error.Semantics,
     }
 }
 
 fn substract(self: *Self) !void {
-    try self.pushData(.number, .{ .number = try self.leftNumber() - try self.rightNumber() });
+    try self.pushValue(.{ .number = try self.leftNumber() - try self.rightNumber() });
 }
 
 fn greater(self: *Self) !void {
     const result = try self.leftNumber() > try self.rightNumber();
-    try self.pushEmpty(if (result) .true else .false);
+    try self.pushValue(if (result) .true else .false);
 }
 
 fn greater_equal(self: *Self) !void {
     const result = try self.leftNumber() >= try self.rightNumber();
-    try self.pushEmpty(if (result) .true else .false);
+    try self.pushValue(if (result) .true else .false);
 }
 
 fn less(self: *Self) !void {
     const result = try self.leftNumber() < try self.rightNumber();
-    try self.pushEmpty(if (result) .true else .false);
+    try self.pushValue(if (result) .true else .false);
 }
 
 fn less_equal(self: *Self) !void {
     const result = try self.leftNumber() <= try self.rightNumber();
-    try self.pushEmpty(if (result) .true else .false);
+    try self.pushValue(if (result) .true else .false);
 }
 
 fn equal(self: *Self) !void {
     const result = self.isEqual();
-    try self.pushEmpty(if (result) .true else .false);
+    try self.pushValue(if (result) .true else .false);
 }
 
 fn not_equal(self: *Self) !void {
     const result = !self.isEqual();
-    try self.pushEmpty(if (result) .true else .false);
+    try self.pushValue(if (result) .true else .false);
 }
 
 fn isEqual(self: Self) bool {
@@ -278,47 +334,22 @@ fn isEqual(self: Self) bool {
             .number => |right_number| left_number == right_number,
             else => false,
         },
-        .string, .object => {
-            const left_string = self.maybe_string(self.left.?) orelse return false;
-            const right_string = self.maybe_string(self.right.?) orelse return false;
-            return std.mem.eql(u8, left_string, right_string);
+        .internal_string, .heap_string => switch (self.right.?) {
+            .internal_string, .heap_string => std.mem.eql(u8, self.left.?.string(), self.right.?.string()),
+            else => false,
         },
     };
 }
-
-fn maybe_string(self: Self, value: Value) ?[]const u8 {
-    return switch (value) {
-        .string => |index| self.ast.string(index),
-        .object => |object| switch (object.tag) {
-            .string => object.string(),
-        },
-        else => null,
-    };
-}
-
-pub const RuntimeValue = struct {
-    runtime: *const Self,
-    value: Value,
-
-    pub fn format(self: RuntimeValue, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (self.value) {
-            .nil, .true, .false => try writer.writeAll(@tagName(self.value)),
-            .number => |number| try writer.print("{d}", .{number}),
-            .string, .object => if (self.runtime.maybe_string(self.value)) |string|
-                try writer.writeAll(string),
-        }
-    }
-};
 
 fn testEvaluate(source: []const u8, expected: []const u8) !void {
     const testing = std.testing;
     const allocator = testing.allocator;
     const parsing = @import("parsing.zig");
 
-    const ast = try parsing.parse(allocator, source);
+    const ast = try parsing.parse(allocator, source, .expression);
     defer ast.deinit(allocator);
 
-    var runtime = Self.init(allocator, ast);
+    var runtime = Self.init(allocator, ast, undefined);
     defer runtime.deinit();
 
     const value = try runtime.evaluate();
@@ -373,4 +404,29 @@ test "semantics errors" {
     try testSemanticsError("\"foo\" * 42");
     try testSemanticsError("true / 2");
     try testSemanticsError("\"quz\" + 2");
+}
+
+fn testRun(source: []const u8, expected: []const u8) !void {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+    const parsing = @import("parsing.zig");
+
+    const ast = try parsing.parse(allocator, source, .program);
+    defer ast.deinit(allocator);
+
+    var out_buffer = std.ArrayList(u8).init(allocator);
+    defer out_buffer.deinit();
+
+    var runtime = Self.init(allocator, ast, out_buffer.writer().any());
+    defer runtime.deinit();
+
+    try runtime.run();
+
+    try testing.expectEqualStrings(expected, out_buffer.items);
+}
+
+test "run statements" {
+    try testRun("print \"Hello, World!\";", "Hello, World!\n");
+    try testRun("print 12 + 24;", "36\n");
+    try testRun("print true;", "true\n");
 }
