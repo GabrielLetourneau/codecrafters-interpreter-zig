@@ -48,19 +48,45 @@ pub fn parse(allocator: Allocator, file_contents: []const u8, root_symbol: RootS
 const Parser = struct {
     scanner: Scanner,
     allocator: Allocator,
+
     tags_list: std.ArrayListUnmanaged(Ast.NodeTag) = .{},
     data_list: std.ArrayListUnmanaged(Ast.Data) = .{},
+
     string_indexes_list: std.ArrayListUnmanaged(usize) = .{},
     string_buffer: std.ArrayListUnmanaged(u8) = .{},
     start_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
+
+    identifiers: std.StringArrayHashMap(void),
+
     next_token: ?Scanner.Token = null,
 
     const Self = @This();
 
     fn program(self: *Self) !void {
+
+        // global variable frame
+        self.addData(.alloc_frame, .{ .index = 0 });
+
         while (self.nextToken()) |_| {
             try self.statement();
         }
+
+        // global frame variable count
+        self.data_list[0] = .{ .index = self.identifiers.count() };
+    }
+
+    fn declaration(self: *Self) !void {
+        if (self.match(.@"var")) |_| {
+            const identifier = try self.match(.identifier) orelse return error.Syntax;
+            const index_result = try self.identifiers.getOrPut(identifier);
+            const index = index_result.index;
+
+            if (self.match(.equal)) |_| {
+                try self.expression();
+                if (self.match(.semicolon) == null) return error.Syntax;
+                try self.addData(.var_decl_init, .{ .index = index });
+            } else try self.addData(.var_decl, .{ .index = index });
+        } else self.statement();
     }
 
     fn statement(self: *Self) !void {
