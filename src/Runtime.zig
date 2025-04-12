@@ -165,6 +165,7 @@ pub fn run(self: *Self) !void {
             .nil => try self.pushValue(.nil),
             .true => try self.pushValue(.true),
             .false => try self.pushValue(.false),
+            .undefined => return error.Semantics,
 
             .group => {},
             .not => {
@@ -496,6 +497,7 @@ test "semantics errors" {
     try testSemanticsError("\"foo\" * 42");
     try testSemanticsError("true / 2");
     try testSemanticsError("\"quz\" + 2");
+    try testSemanticsError("2 + a");
 }
 
 fn testRun(source: []const u8, expected: []const u8) !void {

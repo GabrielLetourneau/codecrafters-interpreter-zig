@@ -204,8 +204,9 @@ const Parser = struct {
 
             try self.addEmpty(.group);
         } else if (self.match(.identifier)) |identifier| {
-            const index = self.identifiers.getIndex(identifier.lexeme) orelse return error.Syntax;
-            try self.addData(.identifier, .{ .index = index });
+            if (self.identifiers.getIndex(identifier.lexeme)) |index| {
+                try self.addData(.identifier, .{ .index = index });
+            } else try self.addEmpty(.undefined);
         } else return error.Syntax;
     }
 

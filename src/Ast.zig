@@ -7,6 +7,7 @@ pub const NodeTag = enum(u8) {
     nil,
     true,
     false,
+    undefined,
 
     // Unary expressions, no data
     group = 0x10,
