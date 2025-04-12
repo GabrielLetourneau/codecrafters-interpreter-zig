@@ -432,12 +432,22 @@ fn isEqual(self: Self) bool {
 }
 
 fn setVariable(self: *Self, variable_index: usize, value: Value) !void {
-    if (self.variables_stack.items[variable_index] != null) return error.Semantics;
+    if (self.variables_stack.items[variable_index]) |variable| {
+        const maybe_existing_heap_string = switch (variable.tag) {
+            .heap_string => variable.data.heap_string,
+            else => null,
+        };
 
-    const variable = try self.heap.create();
-    variable.ref_count = 1;
-    variable.setValue(value);
-    self.variables_stack.items[variable_index] = variable;
+        variable.setValue(value);
+
+        if (maybe_existing_heap_string) |heap_string|
+            self.decrementRef(heap_string);
+    } else {
+        const variable = try self.heap.create();
+        variable.ref_count = 1;
+        variable.setValue(value);
+        self.variables_stack.items[variable_index] = variable;
+    }
 }
 
 fn testEvaluate(source: []const u8, expected: []const u8) !void {
@@ -545,6 +555,16 @@ test "run statements" {
         \\print bar;
     ,
         \\nil
+        \\
+    );
+    try testRun(
+        \\var baz = "before";
+        \\print baz;
+        \\var baz = "after";
+        \\print baz;
+    ,
+        \\before
+        \\after
         \\
     );
 }
