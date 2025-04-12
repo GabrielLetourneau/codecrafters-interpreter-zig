@@ -88,7 +88,10 @@ const Parser = struct {
                 try self.expression();
                 if (self.match(.semicolon) == null) return error.Syntax;
                 try self.addData(.var_decl_init, .{ .index = index });
-            } else try self.addData(.var_decl, .{ .index = index });
+            } else {
+                if (self.match(.semicolon) == null) return error.Syntax;
+                try self.addData(.var_decl, .{ .index = index });
+            }
         } else try self.statement();
     }
 

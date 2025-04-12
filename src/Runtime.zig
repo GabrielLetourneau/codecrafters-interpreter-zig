@@ -195,7 +195,7 @@ pub fn run(self: *Self) !void {
             },
             .var_decl => {
                 const variable_index = self.ast.node(op_index).dataIndex();
-                try self.set(variable_index, .{ .nil = {} });
+                try self.setVariable(variable_index, .{ .nil = {} });
             },
             .identifier => {
                 const variable_index = self.ast.node(op_index).dataIndex();
@@ -206,7 +206,7 @@ pub fn run(self: *Self) !void {
             .var_decl_init => {
                 self.popValue();
                 const variable_index = self.ast.node(op_index).dataIndex();
-                try self.set(variable_index, self.right.?);
+                try self.setVariable(variable_index, self.right.?);
             },
 
             .multiply => try self.binary(multiply),
@@ -436,7 +436,7 @@ fn setVariable(self: *Self, variable_index: usize, value: Value) !void {
 
     const variable = try self.heap.create();
     variable.ref_count = 1;
-    variable.setValue(self.right.?);
+    variable.setValue(value);
     self.variables_stack.items[variable_index] = variable;
 }
 
@@ -538,6 +538,13 @@ test "run statements" {
     ,
         \\198
         \\297
+        \\
+    );
+    try testRun(
+        \\var bar;
+        \\print bar;
+    ,
+        \\nil
         \\
     );
 }
