@@ -193,7 +193,10 @@ pub fn run(self: *Self) !void {
                 const frame_size = self.ast.node(op_index).dataIndex();
                 try self.variables_stack.appendNTimes(self.allocator, null, frame_size);
             },
-            .var_decl => {},
+            .var_decl => {
+                const variable_index = self.ast.node(op_index).dataIndex();
+                try self.set(variable_index, .{ .nil = {} });
+            },
             .identifier => {
                 const variable_index = self.ast.node(op_index).dataIndex();
                 const variable = self.variables_stack.items[variable_index] orelse return error.Semantics;
@@ -202,14 +205,8 @@ pub fn run(self: *Self) !void {
 
             .var_decl_init => {
                 self.popValue();
-
                 const variable_index = self.ast.node(op_index).dataIndex();
-                if (self.variables_stack.items[variable_index] != null) return error.Semantics;
-
-                const variable = try self.heap.create();
-                variable.ref_count = 1;
-                variable.setValue(self.right.?);
-                self.variables_stack.items[variable_index] = variable;
+                try self.set(variable_index, self.right.?);
             },
 
             .multiply => try self.binary(multiply),
@@ -432,6 +429,15 @@ fn isEqual(self: Self) bool {
             else => false,
         },
     };
+}
+
+fn setVariable(self: *Self, variable_index: usize, value: Value) !void {
+    if (self.variables_stack.items[variable_index] != null) return error.Semantics;
+
+    const variable = try self.heap.create();
+    variable.ref_count = 1;
+    variable.setValue(self.right.?);
+    self.variables_stack.items[variable_index] = variable;
 }
 
 fn testEvaluate(source: []const u8, expected: []const u8) !void {
