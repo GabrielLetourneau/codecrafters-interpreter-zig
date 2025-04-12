@@ -32,34 +32,90 @@ pub const Value = union(enum) {
 const ValueTag = std.meta.Tag(Value);
 
 pub const HeapObjectTag = enum {
+    nil,
+    true,
+    false,
+    number,
+    internal_string,
+    heap_string,
     string_buffer,
     string_prefix,
 };
 
 pub const HeapObject = struct {
-    tag: std.meta.Tag(HeapData),
+    tag: HeapObjectTag,
     ref_count: u32,
     data: HeapData,
 
     fn string(self: HeapObject) []const u8 {
         return switch (self.tag) {
+            .internal_string => self.data.internal_string,
+            .heap_string => self.data.heap_string.string(),
             .string_buffer => self.data.string_buffer,
-            .prefix => self.data.prefix.object.data.string_buffer[0..self.data.prefix.len],
+            .string_prefix => self.data.string_prefix.object.data.string_buffer[0..self.data.string_prefix.len],
+            else => unreachable,
         };
+    }
+
+    fn value(self: *HeapObject) Value {
+        return switch (self.tag) {
+            .nil => .{ .nil = {} },
+            .true => .{ .true = {} },
+            .false => .{ .false = {} },
+            .number => .{ .number = self.data.number },
+            .internal_string => .{ .internal_string = self.data.internal_string },
+            .heap_string => .{ .heap_string = self.data.heap_string },
+            .string_buffer, .string_prefix => unreachable,
+        };
+    }
+
+    fn setValue(self: *HeapObject, new_value: Value) void {
+        switch (new_value) {
+            .nil => {
+                self.tag = .nil;
+                self.data = .{ .empty = {} };
+            },
+            .true => {
+                self.tag = .true;
+                self.data = .{ .empty = {} };
+            },
+            .false => {
+                self.tag = .false;
+                self.data = .{ .empty = {} };
+            },
+            .number => |number| {
+                self.tag = .number;
+                self.data = .{ .number = number };
+            },
+            .internal_string => |internal_string| {
+                self.tag = .internal_string;
+                self.data = .{ .internal_string = internal_string };
+            },
+            .heap_string => |object| {
+                self.tag = .heap_string;
+                self.data = .{ .heap_string = object };
+                object.ref_count += 1;
+            },
+        }
     }
 };
 
 pub const HeapData = union(enum) {
+    empty: void,
+    number: f64,
+    internal_string: []const u8,
+    heap_string: *HeapObject,
     string_buffer: []u8,
-    prefix: struct { object: *HeapObject, len: usize },
+    string_prefix: struct { object: *HeapObject, len: usize },
 };
 
 allocator: Allocator,
 ast: Ast,
 out: Writer,
+heap: std.heap.MemoryPool(HeapObject),
+variables_stack: std.ArrayListUnmanaged(?*HeapObject),
 tags_stack: std.ArrayListUnmanaged(ValueTag),
 data_stack: std.ArrayListUnmanaged(StackData),
-heap: std.heap.MemoryPool(HeapObject),
 left: ?Value = null,
 right: ?Value = null,
 
@@ -79,15 +135,27 @@ pub fn init(allocator: Allocator, ast: Ast, out: Writer) Self {
         .out = out,
         .tags_stack = .{},
         .data_stack = .{},
+        .variables_stack = .{},
         .heap = std.heap.MemoryPool(HeapObject).init(allocator),
     };
 }
 
 pub fn deinit(self: *Self) void {
     self.freeArguments();
-    self.heap.deinit();
+
+    while (self.tags_stack.items.len > 0) {
+        self.popValue();
+        self.freeArguments();
+    }
     self.data_stack.deinit(self.allocator);
     self.tags_stack.deinit(self.allocator);
+
+    while (self.variables_stack.pop()) |maybe_variable|
+        if (maybe_variable) |variable|
+            self.decrementRef(variable);
+    self.variables_stack.deinit(self.allocator);
+
+    self.heap.deinit();
 }
 
 pub fn run(self: *Self) !void {
@@ -120,6 +188,28 @@ pub fn run(self: *Self) !void {
 
             .number => try self.pushValue(.{ .number = self.ast.node(op_index).number() }),
             .string => try self.pushValue(.{ .internal_string = self.ast.node(op_index).string() }),
+            .alloc_frame => {
+                const frame_size = self.ast.node(op_index).dataIndex();
+                try self.variables_stack.appendNTimes(self.allocator, null, frame_size);
+            },
+            .var_decl => {},
+            .identifier => {
+                const variable_index = self.ast.node(op_index).dataIndex();
+                const variable = self.variables_stack.items[variable_index] orelse return error.Semantics;
+                try self.pushValue(variable.value());
+            },
+
+            .var_decl_init => {
+                self.popValue();
+
+                const variable_index = self.ast.node(op_index).dataIndex();
+                if (self.variables_stack.items[variable_index] != null) return error.Semantics;
+
+                const variable = try self.heap.create();
+                variable.ref_count = 1;
+                variable.setValue(self.right.?);
+                self.variables_stack.items[variable_index] = variable;
+            },
 
             .multiply => try self.binary(multiply),
             .divide => try self.binary(divide),
@@ -198,7 +288,8 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
     if (object.ref_count == 0) {
         switch (object.tag) {
             .string_buffer => self.allocator.free(object.data.string_buffer),
-            .prefix => self.decrementRef(object.data.prefix.object),
+            .string_prefix => self.decrementRef(object.data.string_prefix.object),
+            else => {},
         }
 
         self.heap.destroy(object);
@@ -263,8 +354,9 @@ fn add(self: *Self) !void {
         },
         .heap_string => |left_object| {
             var buffer = switch (left_object.tag) {
-                .prefix => continue :sw .{ .internal_string = left_object.string() },
+                .string_prefix => continue :sw .{ .internal_string = left_object.string() },
                 .string_buffer => left_object.data.string_buffer,
+                else => unreachable,
             };
 
             const right_string = switch (self.right.?) {
@@ -284,8 +376,8 @@ fn add(self: *Self) !void {
             object.data = .{ .string_buffer = buffer };
             try self.pushValue(.{ .heap_string = object });
 
-            left_object.tag = .prefix;
-            left_object.data = .{ .prefix = .{ .object = object, .len = left_len } };
+            left_object.tag = .string_prefix;
+            left_object.data = .{ .string_prefix = .{ .object = object, .len = left_len } };
         },
         else => return error.Semantics,
     }
@@ -429,4 +521,15 @@ test "run statements" {
     try testRun("print \"Hello, World!\";", "Hello, World!\n");
     try testRun("print 12 + 24;", "36\n");
     try testRun("print true;", "true\n");
+    try testRun(
+        \\var bar = 99;
+        \\var foo = 99;
+        \\print bar + foo;
+        \\var quz = 99;
+        \\print bar + foo + quz;
+    ,
+        \\198
+        \\297
+        \\
+    );
 }

@@ -11,7 +11,10 @@ pub fn parse(allocator: Allocator, file_contents: []const u8, root_symbol: RootS
         .scanner = .{ .source = file_contents },
         .allocator = allocator,
     };
-    defer parser.start_index_of_strings.deinit(allocator);
+    defer {
+        parser.identifiers.deinit(allocator);
+        parser.start_index_of_strings.deinit(allocator);
+    }
     errdefer {
         parser.string_buffer.deinit(allocator);
         parser.string_indexes_list.deinit(allocator);
@@ -56,7 +59,7 @@ const Parser = struct {
     string_buffer: std.ArrayListUnmanaged(u8) = .{},
     start_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
 
-    identifiers: std.StringArrayHashMap(void),
+    identifiers: std.StringArrayHashMapUnmanaged(void) = std.StringArrayHashMapUnmanaged(void).empty,
 
     next_token: ?Scanner.Token = null,
 
@@ -65,20 +68,20 @@ const Parser = struct {
     fn program(self: *Self) !void {
 
         // global variable frame
-        self.addData(.alloc_frame, .{ .index = 0 });
+        try self.addData(.alloc_frame, .{ .index = 0 });
 
         while (self.nextToken()) |_| {
-            try self.statement();
+            try self.declaration();
         }
 
         // global frame variable count
-        self.data_list[0] = .{ .index = self.identifiers.count() };
+        self.data_list.items[0] = .{ .index = self.identifiers.count() };
     }
 
     fn declaration(self: *Self) !void {
         if (self.match(.@"var")) |_| {
-            const identifier = try self.match(.identifier) orelse return error.Syntax;
-            const index_result = try self.identifiers.getOrPut(identifier);
+            const identifier = self.match(.identifier) orelse return error.Syntax;
+            const index_result = try self.identifiers.getOrPut(self.allocator, identifier.lexeme);
             const index = index_result.index;
 
             if (self.match(.equal)) |_| {
@@ -86,7 +89,7 @@ const Parser = struct {
                 if (self.match(.semicolon) == null) return error.Syntax;
                 try self.addData(.var_decl_init, .{ .index = index });
             } else try self.addData(.var_decl, .{ .index = index });
-        } else self.statement();
+        } else try self.statement();
     }
 
     fn statement(self: *Self) !void {
@@ -200,6 +203,9 @@ const Parser = struct {
                 return error.Syntax;
 
             try self.addEmpty(.group);
+        } else if (self.match(.identifier)) |identifier| {
+            const index = self.identifiers.getIndex(identifier.lexeme) orelse return error.Syntax;
+            try self.addData(.identifier, .{ .index = index });
         } else return error.Syntax;
     }
 

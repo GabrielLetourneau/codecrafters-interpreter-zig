@@ -106,6 +106,10 @@ pub const Node = struct {
         }
     }
 
+    pub fn dataIndex(self: Self) usize {
+        return self.data().index;
+    }
+
     pub fn string(self: Self) []const u8 {
         const index = self.data().index;
         const start = self.ast.string_starts[index];
