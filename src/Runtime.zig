@@ -197,7 +197,7 @@ pub fn run(self: *Self) !void {
                 const variable_index = self.ast.node(op_index).dataIndex();
                 try self.setVariable(variable_index, .{ .nil = {} });
             },
-            .identifier => {
+            .variable => {
                 const variable_index = self.ast.node(op_index).dataIndex();
                 const variable = self.variables_stack.items[variable_index] orelse return error.Semantics;
                 try self.pushValue(variable.value());
@@ -207,6 +207,12 @@ pub fn run(self: *Self) !void {
                 self.popValue();
                 const variable_index = self.ast.node(op_index).dataIndex();
                 try self.setVariable(variable_index, self.right.?);
+            },
+            .assignment => {
+                self.popValue();
+                const variable_index = self.ast.node(op_index).dataIndex();
+                try self.setVariable(variable_index, self.right.?);
+                try self.pushValue(self.right.?);
             },
 
             .multiply => try self.binary(multiply),
@@ -565,6 +571,18 @@ test "run statements" {
     ,
         \\before
         \\after
+        \\
+    );
+    try testRun(
+        \\var quz;
+        \\var hello;
+        \\
+        \\quz = hello = 16 + 34 * 92;
+        \\print quz;
+        \\print hello;
+    ,
+        \\3144
+        \\3144
         \\
     );
 }

@@ -107,7 +107,25 @@ const Parser = struct {
     }
 
     fn expression(self: *Self) error{ OutOfMemory, Syntax }!void {
+        try self.assignment();
+    }
+
+    fn assignment(self: *Self) !void {
         try self.equality();
+
+        if (self.match(.equal) != null) {
+            const left_index = self.tags_list.items.len - 1;
+            if (self.tags_list.items[left_index] != .variable)
+                return error.Syntax;
+
+            // Back off from the variable op, we will push an assignment on top of the right-hand side
+            _ = self.tags_list.pop();
+            const variable_index = self.data_list.pop().?.index;
+
+            try self.assignment();
+
+            try self.addData(.assignment, .{ .index = variable_index });
+        }
     }
 
     fn equality(self: *Self) !void {
@@ -208,7 +226,7 @@ const Parser = struct {
             try self.addEmpty(.group);
         } else if (self.match(.identifier)) |identifier| {
             if (self.identifiers.getIndex(identifier.lexeme)) |index| {
-                try self.addData(.identifier, .{ .index = index });
+                try self.addData(.variable, .{ .index = index });
             } else try self.addEmpty(.undefined);
         } else return error.Syntax;
     }

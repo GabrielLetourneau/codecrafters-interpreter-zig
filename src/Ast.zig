@@ -25,10 +25,11 @@ pub const NodeTag = enum(u8) {
     // Statement, data
     alloc_frame, // data is frame variable count
     var_decl, // data is variable index
-    identifier, // data is variable index
+    variable, // data is variable index
 
     // Statements, child expression, data
     var_decl_init,
+    assignment,
 
     // Binary expressions
     multiply = 0x30,
