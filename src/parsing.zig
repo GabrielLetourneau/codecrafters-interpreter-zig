@@ -62,6 +62,7 @@ const Parser = struct {
 
     identifiers: std.StringArrayHashMapUnmanaged(void) = std.StringArrayHashMapUnmanaged(void).empty,
     frame_variables: std.ArrayListUnmanaged(usize) = .{},
+    current_frame_base: usize = 0,
 
     next_token: ?Scanner.Token = null,
 
@@ -86,10 +87,13 @@ const Parser = struct {
             const identifier_index_result = try self.identifiers.getOrPut(self.allocator, identifier.lexeme);
             const identifier_index = identifier_index_result.index;
 
-            const variable_index = if (self.findVariableIndex(identifier_index)) |index| index else blk: {
+            var variable_index: usize = undefined;
+            if (self.findVariableIndex(identifier_index, self.current_frame_base)) |index| {
+                variable_index = index;
+            } else {
                 try self.frame_variables.append(self.allocator, identifier_index);
-                break :blk self.frame_variables.items.len - 1;
-            };
+                variable_index = self.frame_variables.items.len - 1;
+            }
 
             if (self.match(.equal)) |_| {
                 try self.expression();
@@ -104,7 +108,9 @@ const Parser = struct {
 
     fn statement(self: *Self) !void {
         if (self.match(.left_brace)) |_| { // block
-            const frame_base_index = self.frame_variables.items.len;
+            const old_frame_base = self.current_frame_base;
+            self.current_frame_base = self.frame_variables.items.len;
+
             const alloc_frame_op_index = self.tags_list.items.len;
             try self.addData(.alloc_frame, .{ .index = 0 }); // push new frame, full size will be found later
 
@@ -113,8 +119,9 @@ const Parser = struct {
 
             self.data_list.items[alloc_frame_op_index] = .{ .index = self.frame_variables.items.len };
 
-            try self.addData(.alloc_frame, .{ .index = frame_base_index }); // pop frame
-            self.frame_variables.shrinkRetainingCapacity(frame_base_index);
+            try self.addData(.alloc_frame, .{ .index = self.current_frame_base }); // pop frame
+            self.frame_variables.shrinkRetainingCapacity(self.current_frame_base);
+            self.current_frame_base = old_frame_base;
         } else if (self.match(.print)) |_| { // print statement
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;
@@ -246,7 +253,7 @@ const Parser = struct {
             try self.addEmpty(.group);
         } else if (self.match(.identifier)) |identifier| {
             if (self.identifiers.getIndex(identifier.lexeme)) |identifier_index| {
-                if (self.findVariableIndex(identifier_index)) |variable_index| {
+                if (self.findVariableIndex(identifier_index, 0)) |variable_index| {
                     try self.addData(.variable, .{ .index = variable_index });
                     return;
                 }
@@ -287,9 +294,9 @@ const Parser = struct {
         try self.data_list.append(self.allocator, data);
     }
 
-    fn findVariableIndex(self: Self, identifier_index: usize) ?usize {
+    fn findVariableIndex(self: Self, identifier_index: usize, base_index: usize) ?usize {
         var variable_index = self.frame_variables.items.len;
-        while (variable_index > 0) {
+        while (variable_index > base_index) {
             variable_index -= 1;
             if (self.frame_variables.items[variable_index] == identifier_index)
                 return variable_index;

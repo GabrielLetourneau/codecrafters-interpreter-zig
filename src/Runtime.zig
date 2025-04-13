@@ -303,6 +303,7 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
     object.*.ref_count -= 1;
     if (object.ref_count == 0) {
         switch (object.tag) {
+            .heap_string => self.decrementRef(object.data.heap_string),
             .string_buffer => self.allocator.free(object.data.string_buffer),
             .string_prefix => self.decrementRef(object.data.string_prefix.object),
             else => {},
@@ -609,6 +610,20 @@ test "run statements" {
     ,
         \\before
         \\after
+        \\
+    );
+    try testRun(
+        \\{
+        \\    var world = "before";
+        \\    {
+        \\        var world = "after";
+        \\        print world;
+        \\    }
+        \\    print world;
+        \\}
+    ,
+        \\after
+        \\before
         \\
     );
 }
