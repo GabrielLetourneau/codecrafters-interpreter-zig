@@ -112,10 +112,14 @@ pub const HeapData = union(enum) {
 allocator: Allocator,
 ast: Ast,
 out: Writer,
+
 heap: std.heap.MemoryPool(HeapObject),
+
 variables_stack: std.ArrayListUnmanaged(?*HeapObject),
+
 tags_stack: std.ArrayListUnmanaged(ValueTag),
 data_stack: std.ArrayListUnmanaged(StackData),
+
 left: ?Value = null,
 right: ?Value = null,
 
@@ -190,8 +194,16 @@ pub fn run(self: *Self) !void {
             .number => try self.pushValue(.{ .number = self.ast.node(op_index).number() }),
             .string => try self.pushValue(.{ .internal_string = self.ast.node(op_index).string() }),
             .alloc_frame => {
-                const frame_size = self.ast.node(op_index).dataIndex();
-                try self.variables_stack.appendNTimes(self.allocator, null, frame_size);
+                const old_stack_size = self.variables_stack.items.len;
+                const new_stack_size = self.ast.node(op_index).dataIndex();
+
+                if (new_stack_size > old_stack_size) {
+                    try self.variables_stack.appendNTimes(self.allocator, null, new_stack_size - old_stack_size);
+                } else {
+                    while (self.variables_stack.items.len > new_stack_size)
+                        if (self.variables_stack.pop().?) |variable|
+                            self.decrementRef(variable);
+                }
             },
             .var_decl => {
                 const variable_index = self.ast.node(op_index).dataIndex();
@@ -583,6 +595,20 @@ test "run statements" {
     ,
         \\3144
         \\3144
+        \\
+    );
+    try testRun(
+        \\{
+        \\    var world = "before";
+        \\    print world;        
+        \\}
+        \\{
+        \\    var world = "after";
+        \\    print world;
+        \\}
+    ,
+        \\before
+        \\after
         \\
     );
 }

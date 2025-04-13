@@ -23,7 +23,7 @@ pub const NodeTag = enum(u8) {
     string,
 
     // Statement, data
-    alloc_frame, // data is frame variable count
+    alloc_frame, // data is new frame variable count
     var_decl, // data is variable index
     variable, // data is variable index
 

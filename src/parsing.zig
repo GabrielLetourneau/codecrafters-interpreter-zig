@@ -12,6 +12,7 @@ pub fn parse(allocator: Allocator, file_contents: []const u8, root_symbol: RootS
         .allocator = allocator,
     };
     defer {
+        parser.frame_variables.deinit(allocator);
         parser.identifiers.deinit(allocator);
         parser.start_index_of_strings.deinit(allocator);
     }
@@ -60,6 +61,7 @@ const Parser = struct {
     start_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
 
     identifiers: std.StringArrayHashMapUnmanaged(void) = std.StringArrayHashMapUnmanaged(void).empty,
+    frame_variables: std.ArrayListUnmanaged(usize) = .{},
 
     next_token: ?Scanner.Token = null,
 
@@ -75,35 +77,53 @@ const Parser = struct {
         }
 
         // global frame variable count
-        self.data_list.items[0] = .{ .index = self.identifiers.count() };
+        self.data_list.items[0] = .{ .index = self.frame_variables.items.len };
     }
 
-    fn declaration(self: *Self) !void {
+    fn declaration(self: *Self) error{ OutOfMemory, Syntax }!void {
         if (self.match(.@"var")) |_| {
             const identifier = self.match(.identifier) orelse return error.Syntax;
-            const index_result = try self.identifiers.getOrPut(self.allocator, identifier.lexeme);
-            const index = index_result.index;
+            const identifier_index_result = try self.identifiers.getOrPut(self.allocator, identifier.lexeme);
+            const identifier_index = identifier_index_result.index;
+
+            const variable_index = if (self.findVariableIndex(identifier_index)) |index| index else blk: {
+                try self.frame_variables.append(self.allocator, identifier_index);
+                break :blk self.frame_variables.items.len - 1;
+            };
 
             if (self.match(.equal)) |_| {
                 try self.expression();
                 if (self.match(.semicolon) == null) return error.Syntax;
-                try self.addData(.var_decl_init, .{ .index = index });
+                try self.addData(.var_decl_init, .{ .index = variable_index });
             } else {
                 if (self.match(.semicolon) == null) return error.Syntax;
-                try self.addData(.var_decl, .{ .index = index });
+                try self.addData(.var_decl, .{ .index = variable_index });
             }
         } else try self.statement();
     }
 
     fn statement(self: *Self) !void {
-        const tag: Ast.NodeTag =
-            if (self.match(.print)) |_| .print else .discard;
+        if (self.match(.left_brace)) |_| { // block
+            const frame_base_index = self.frame_variables.items.len;
+            const alloc_frame_op_index = self.tags_list.items.len;
+            try self.addData(.alloc_frame, .{ .index = 0 }); // push new frame, full size will be found later
 
-        try self.expression();
+            while (self.match(.right_brace) == null)
+                try self.declaration();
 
-        if (self.match(.semicolon) == null) return error.Syntax;
+            self.data_list.items[alloc_frame_op_index] = .{ .index = self.frame_variables.items.len };
 
-        try self.addEmpty(tag);
+            try self.addData(.alloc_frame, .{ .index = frame_base_index }); // pop frame
+            self.frame_variables.shrinkRetainingCapacity(frame_base_index);
+        } else if (self.match(.print)) |_| { // print statement
+            try self.expression();
+            if (self.match(.semicolon) == null) return error.Syntax;
+            try self.addEmpty(.print);
+        } else { // expression statement
+            try self.expression();
+            if (self.match(.semicolon) == null) return error.Syntax;
+            try self.addEmpty(.discard);
+        }
     }
 
     fn expression(self: *Self) error{ OutOfMemory, Syntax }!void {
@@ -225,9 +245,13 @@ const Parser = struct {
 
             try self.addEmpty(.group);
         } else if (self.match(.identifier)) |identifier| {
-            if (self.identifiers.getIndex(identifier.lexeme)) |index| {
-                try self.addData(.variable, .{ .index = index });
-            } else try self.addEmpty(.undefined);
+            if (self.identifiers.getIndex(identifier.lexeme)) |identifier_index| {
+                if (self.findVariableIndex(identifier_index)) |variable_index| {
+                    try self.addData(.variable, .{ .index = variable_index });
+                    return;
+                }
+            }
+            try self.addEmpty(.undefined);
         } else return error.Syntax;
     }
 
@@ -261,6 +285,15 @@ const Parser = struct {
     fn addData(self: *Self, tag: Ast.NodeTag, data: Ast.Data) !void {
         try self.tags_list.append(self.allocator, tag);
         try self.data_list.append(self.allocator, data);
+    }
+
+    fn findVariableIndex(self: Self, identifier_index: usize) ?usize {
+        var variable_index = self.frame_variables.items.len;
+        while (variable_index > 0) {
+            variable_index -= 1;
+            if (self.frame_variables.items[variable_index] == identifier_index)
+                return variable_index;
+        } else return null;
     }
 };
 
