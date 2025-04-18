@@ -264,11 +264,10 @@ const Parser = struct {
             const string = token.literal.string;
             const start_index_result = try self.start_index_of_strings.getOrPut(self.allocator, string);
             if (!start_index_result.found_existing) {
-                const start = self.string_buffer.items.len;
                 try self.string_buffer.appendSlice(self.allocator, string);
                 const end = self.string_buffer.items.len;
 
-                start_index_result.key_ptr.* = self.string_buffer.items[start..];
+                start_index_result.key_ptr.* = string;
                 start_index_result.value_ptr.* = self.string_indexes_list.items.len - 1;
 
                 try self.string_indexes_list.append(self.allocator, end);
