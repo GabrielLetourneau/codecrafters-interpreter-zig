@@ -24,8 +24,10 @@ pub const NodeTag = enum(u8) {
 
     // Statement, data
     alloc_frame, // data is new frame variable count
+    free_frame,
     var_decl, // data is variable index
-    variable, // data is variable index
+    variable,
+    branch_cond_not, // data is jump target
 
     // Statements, child expression, data
     var_decl_init,

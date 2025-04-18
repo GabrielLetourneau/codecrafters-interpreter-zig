@@ -112,16 +112,29 @@ const Parser = struct {
             self.current_frame_base = self.frame_variables.items.len;
 
             const alloc_frame_op_index = self.tags_list.items.len;
-            try self.addData(.alloc_frame, .{ .index = 0 }); // push new frame, full size will be found later
+            try self.addData(.alloc_frame, .{ .index = undefined }); // push new frame, full size will be found later
 
             while (self.match(.right_brace) == null)
                 try self.declaration();
 
-            self.data_list.items[alloc_frame_op_index] = .{ .index = self.frame_variables.items.len };
+            const frame_size = self.frame_variables.items.len - self.current_frame_base;
+            self.data_list.items[alloc_frame_op_index] = .{ .index = frame_size };
 
-            try self.addData(.alloc_frame, .{ .index = self.current_frame_base }); // pop frame
+            try self.addData(.free_frame, .{ .index = frame_size }); // pop frame
             self.frame_variables.shrinkRetainingCapacity(self.current_frame_base);
             self.current_frame_base = old_frame_base;
+        } else if (self.match(.@"if")) |_| {
+            if (self.match(.left_paren) == null) return error.Syntax;
+            try self.expression();
+            if (self.match(.right_paren) == null) return error.Syntax;
+
+            const branch_op_index = self.tags_list.items.len;
+            try self.addData(.branch_cond_not, .{ .index = undefined });
+
+            try self.statement();
+            // branch target starts here
+            const target_index = self.tags_list.items.len;
+            self.data_list.items[branch_op_index] = .{ .index = target_index };
         } else if (self.match(.print)) |_| { // print statement
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;

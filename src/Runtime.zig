@@ -27,6 +27,13 @@ pub const Value = union(enum) {
             else => unreachable,
         };
     }
+
+    fn truthy(self: Value) bool {
+        return switch (self) {
+            .nil, .false => false,
+            else => true,
+        };
+    }
 };
 
 const ValueTag = std.meta.Tag(Value);
@@ -163,9 +170,10 @@ pub fn deinit(self: *Self) void {
 }
 
 pub fn run(self: *Self) !void {
-    for (self.ast.tags, 0..) |op, op_index| {
+    var op_index: usize = 0;
+    while (op_index < self.ast.tags.len) {
         defer self.freeArguments();
-        switch (op) {
+        switch (self.ast.tags[op_index]) {
             .nil => try self.pushValue(.nil),
             .true => try self.pushValue(.true),
             .false => try self.pushValue(.false),
@@ -174,10 +182,7 @@ pub fn run(self: *Self) !void {
             .group => {},
             .not => {
                 self.popValue();
-                const result: Value = switch (self.right.?) {
-                    .nil, .false => .true,
-                    else => .false,
-                };
+                const result: Value = if (self.right.?.truthy()) .{ .false = {} } else .{ .true = {} };
                 try self.pushValue(result);
             },
             .unary_minus => {
@@ -194,16 +199,14 @@ pub fn run(self: *Self) !void {
             .number => try self.pushValue(.{ .number = self.ast.node(op_index).number() }),
             .string => try self.pushValue(.{ .internal_string = self.ast.node(op_index).string() }),
             .alloc_frame => {
-                const old_stack_size = self.variables_stack.items.len;
-                const new_stack_size = self.ast.node(op_index).dataIndex();
-
-                if (new_stack_size > old_stack_size) {
-                    try self.variables_stack.appendNTimes(self.allocator, null, new_stack_size - old_stack_size);
-                } else {
-                    while (self.variables_stack.items.len > new_stack_size)
-                        if (self.variables_stack.pop().?) |variable|
-                            self.decrementRef(variable);
-                }
+                const frame_size = self.ast.node(op_index).dataIndex();
+                try self.variables_stack.appendNTimes(self.allocator, null, frame_size);
+            },
+            .free_frame => {
+                var frame_size = self.ast.node(op_index).dataIndex();
+                while (frame_size != 0) : (frame_size -= 1)
+                    if (self.variables_stack.pop().?) |variable|
+                        self.decrementRef(variable);
             },
             .var_decl => {
                 const variable_index = self.ast.node(op_index).dataIndex();
@@ -213,6 +216,13 @@ pub fn run(self: *Self) !void {
                 const variable_index = self.ast.node(op_index).dataIndex();
                 const variable = self.variables_stack.items[variable_index] orelse return error.Semantics;
                 try self.pushValue(variable.value());
+            },
+            .branch_cond_not => {
+                self.popValue();
+                if (!self.right.?.truthy()) {
+                    op_index = self.ast.node(op_index).dataIndex();
+                    continue;
+                }
             },
 
             .var_decl_init => {
@@ -238,6 +248,7 @@ pub fn run(self: *Self) !void {
             .equal => try self.binary(equal),
             .not_equal => try self.binary(not_equal),
         }
+        op_index += 1;
     }
 }
 
@@ -624,6 +635,24 @@ test "run statements" {
     ,
         \\after
         \\before
+        \\
+    );
+}
+
+test "control flow" {
+    try testRun(
+        \\var stage = "unknown";
+        \\var age = 50;
+        \\if (age < 18) { stage = "child"; }
+        \\if (age >= 18) { stage = "adult"; }
+        \\print stage;
+        \\
+        \\var isAdult = age >= 18;
+        \\if (isAdult) { print "eligible for voting: true"; }
+        \\if (!isAdult) { print "eligible for voting: false"; }
+    ,
+        \\adult
+        \\eligible for voting: true
         \\
     );
 }
