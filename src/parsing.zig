@@ -112,7 +112,7 @@ const Parser = struct {
             self.current_frame_base = self.frame_variables.items.len;
 
             const alloc_frame_op_index = self.tags_list.items.len;
-            try self.addData(.alloc_frame, .{ .index = undefined }); // push new frame, full size will be found later
+            try self.addData(.alloc_frame, undefined); // push new frame, full size will be found later
 
             while (self.match(.right_brace) == null)
                 try self.declaration();
@@ -128,13 +128,31 @@ const Parser = struct {
             try self.expression();
             if (self.match(.right_paren) == null) return error.Syntax;
 
-            const branch_op_index = self.tags_list.items.len;
-            try self.addData(.branch_cond_not, .{ .index = undefined });
+            const if_branch_op_index = self.tags_list.items.len;
+            try self.addData(.branch_cond_false, undefined);
 
+            // if shadow
             try self.statement();
-            // branch target starts here
-            const target_index = self.tags_list.items.len;
-            self.data_list.items[branch_op_index] = .{ .index = target_index };
+
+            if (self.match(.@"else")) |_| {
+                // at end of if shadow, unconditionnaly jump to past else shadow
+                const else_branch_op_index = self.tags_list.items.len;
+                try self.addData(.branch_uncond, undefined);
+
+                // if branch target starts here
+                const if_target_index = self.tags_list.items.len;
+                self.data_list.items[if_branch_op_index] = .{ .index = if_target_index };
+
+                // else shadow
+                try self.statement();
+
+                const else_target_index = self.tags_list.items.len;
+                self.data_list.items[else_branch_op_index] = .{ .index = else_target_index };
+            } else {
+                // if branch target starts here
+                const if_target_index = self.tags_list.items.len;
+                self.data_list.items[if_branch_op_index] = .{ .index = if_target_index };
+            }
         } else if (self.match(.print)) |_| { // print statement
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;

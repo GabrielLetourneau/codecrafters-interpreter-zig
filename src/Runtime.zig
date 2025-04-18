@@ -217,7 +217,18 @@ pub fn run(self: *Self) !void {
                 const variable = self.variables_stack.items[variable_index] orelse return error.Semantics;
                 try self.pushValue(variable.value());
             },
-            .branch_cond_not => {
+            .branch_uncond => {
+                op_index = self.ast.node(op_index).dataIndex();
+                continue;
+            },
+            .branch_cond_true => {
+                self.popValue();
+                if (self.right.?.truthy()) {
+                    op_index = self.ast.node(op_index).dataIndex();
+                    continue;
+                }
+            },
+            .branch_cond_false => {
                 self.popValue();
                 if (!self.right.?.truthy()) {
                     op_index = self.ast.node(op_index).dataIndex();
@@ -653,6 +664,14 @@ test "control flow" {
     ,
         \\adult
         \\eligible for voting: true
+        \\
+    );
+    try testRun(
+        \\if (true) print "if branch"; else print "else branch";
+        \\if (false) print "if branch"; else print "else branch";
+    ,
+        \\if branch
+        \\else branch
         \\
     );
 }
