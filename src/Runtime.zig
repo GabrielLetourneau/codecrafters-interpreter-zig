@@ -243,6 +243,14 @@ pub fn run(self: *Self) !void {
                     continue;
                 }
             },
+            .branch_cond_and => {
+                self.popValue();
+                if (!self.right.?.truthy()) {
+                    try self.pushValue(self.right.?); // replaces popped value
+                    op_index = self.ast.node(op_index).dataIndex();
+                    continue;
+                }
+            },
 
             .var_decl_init => {
                 self.popValue();
@@ -697,6 +705,21 @@ test "control flow" {
         \\world
         \\bar
         \\bar
+        \\
+    );
+    try testRun(
+        \\print false and 1;
+        \\print true and 1;
+        \\print 23 and "hello" and false;
+        \\
+        \\print 23 and true;
+        \\print 23 and "hello" and 23;
+    ,
+        \\false
+        \\1
+        \\false
+        \\true
+        \\23
         \\
     );
 }

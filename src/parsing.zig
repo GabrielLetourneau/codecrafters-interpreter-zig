@@ -187,16 +187,30 @@ const Parser = struct {
     }
 
     fn @"or"(self: *Self) !void {
-        try self.equality();
+        try self.@"and"();
 
         while (self.match(.@"or")) |_| {
             const or_branch_op_index = self.tags_list.items.len;
             try self.addData(.branch_cond_or, undefined);
 
-            try self.equality();
+            try self.@"and"();
 
             const or_target_index = self.tags_list.items.len;
             self.data_list.items[or_branch_op_index] = .{ .index = or_target_index };
+        }
+    }
+
+    fn @"and"(self: *Self) !void {
+        try self.equality();
+
+        while (self.match(.@"and")) |_| {
+            const and_branch_op_index = self.tags_list.items.len;
+            try self.addData(.branch_cond_and, undefined);
+
+            try self.equality();
+
+            const or_target_index = self.tags_list.items.len;
+            self.data_list.items[and_branch_op_index] = .{ .index = or_target_index };
         }
     }
 
