@@ -28,7 +28,6 @@ pub const NodeTag = enum(u8) {
     var_decl, // data is variable index
     variable,
     branch_uncond, // data is jump target
-    branch_cond_true,
     branch_cond_false,
     branch_cond_or,
     branch_cond_and,

@@ -153,6 +153,25 @@ const Parser = struct {
                 const if_target_index = self.tags_list.items.len;
                 self.data_list.items[if_branch_op_index] = .{ .index = if_target_index };
             }
+        } else if (self.match(.@"while")) |_| {
+            const eval_op_index = self.tags_list.items.len;
+
+            if (self.match(.left_paren) == null) return error.Syntax;
+            try self.expression();
+            if (self.match(.right_paren) == null) return error.Syntax;
+
+            const while_branch_op_index = self.tags_list.items.len;
+            try self.addData(.branch_cond_false, undefined);
+
+            // while shadow
+            try self.statement();
+
+            // loop back to condition evaluation
+            try self.addData(.branch_uncond, .{ .index = eval_op_index });
+
+            // while branch target starts here
+            const while_target_index = self.tags_list.items.len;
+            self.data_list.items[while_branch_op_index] = .{ .index = while_target_index };
         } else if (self.match(.print)) |_| { // print statement
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;

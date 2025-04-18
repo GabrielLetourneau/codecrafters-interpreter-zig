@@ -221,13 +221,6 @@ pub fn run(self: *Self) !void {
                 op_index = self.ast.node(op_index).dataIndex();
                 continue;
             },
-            .branch_cond_true => {
-                self.popValue();
-                if (self.right.?.truthy()) {
-                    op_index = self.ast.node(op_index).dataIndex();
-                    continue;
-                }
-            },
             .branch_cond_false => {
                 self.popValue();
                 if (!self.right.?.truthy()) {
@@ -720,6 +713,15 @@ test "control flow" {
         \\false
         \\true
         \\23
+        \\
+    );
+    try testRun(
+        \\var foo = 0;
+        \\while (foo < 3) print foo = foo + 1;
+    ,
+        \\1
+        \\2
+        \\3
         \\
     );
 }
