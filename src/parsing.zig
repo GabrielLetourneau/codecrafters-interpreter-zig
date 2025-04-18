@@ -169,7 +169,7 @@ const Parser = struct {
     }
 
     fn assignment(self: *Self) !void {
-        try self.equality();
+        try self.@"or"();
 
         if (self.match(.equal) != null) {
             const left_index = self.tags_list.items.len - 1;
@@ -183,6 +183,20 @@ const Parser = struct {
             try self.assignment();
 
             try self.addData(.assignment, .{ .index = variable_index });
+        }
+    }
+
+    fn @"or"(self: *Self) !void {
+        try self.equality();
+
+        while (self.match(.@"or")) |_| {
+            const or_branch_op_index = self.tags_list.items.len;
+            try self.addData(.branch_cond_or, undefined);
+
+            try self.equality();
+
+            const or_target_index = self.tags_list.items.len;
+            self.data_list.items[or_branch_op_index] = .{ .index = or_target_index };
         }
     }
 

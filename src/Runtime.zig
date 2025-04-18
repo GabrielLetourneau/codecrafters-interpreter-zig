@@ -235,6 +235,14 @@ pub fn run(self: *Self) !void {
                     continue;
                 }
             },
+            .branch_cond_or => {
+                self.popValue();
+                if (self.right.?.truthy()) {
+                    try self.pushValue(self.right.?); // replaces popped value
+                    op_index = self.ast.node(op_index).dataIndex();
+                    continue;
+                }
+            },
 
             .var_decl_init => {
                 self.popValue();
@@ -672,6 +680,23 @@ test "control flow" {
     ,
         \\if branch
         \\else branch
+        \\
+    );
+    try testRun(
+        \\if (false or "ok") print "baz";
+        \\if (nil or "ok") print "baz";
+        \\
+        \\if (false or false) print "world";
+        \\if (true or "world") print "world";
+        \\
+        \\if (24 or "bar") print "bar";
+        \\if ("bar" or "bar") print "bar";
+    ,
+        \\baz
+        \\baz
+        \\world
+        \\bar
+        \\bar
         \\
     );
 }
