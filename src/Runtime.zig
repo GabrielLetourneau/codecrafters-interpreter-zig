@@ -724,4 +724,20 @@ test "control flow" {
         \\3
         \\
     );
+    try testRun(
+        \\for (var baz = 0; baz < 3;) print baz = baz + 1;
+    ,
+        \\1
+        \\2
+        \\3
+        \\
+    );
+    try testRun(
+        \\var world = 0;
+        \\for (; world < 2; world = world + 1) print world;
+    ,
+        \\0
+        \\1
+        \\
+    );
 }

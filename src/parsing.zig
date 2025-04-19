@@ -82,28 +82,36 @@ const Parser = struct {
     }
 
     fn declaration(self: *Self) error{ OutOfMemory, Syntax }!void {
-        if (self.match(.@"var")) |_| {
-            const identifier = self.match(.identifier) orelse return error.Syntax;
-            const identifier_index_result = try self.identifiers.getOrPut(self.allocator, identifier.lexeme);
-            const identifier_index = identifier_index_result.index;
+        if (!try self.varDeclaration())
+            try self.statement();
+    }
 
-            var variable_index: usize = undefined;
-            if (self.findVariableIndex(identifier_index, self.current_frame_base)) |index| {
-                variable_index = index;
-            } else {
-                try self.frame_variables.append(self.allocator, identifier_index);
-                variable_index = self.frame_variables.items.len - 1;
-            }
+    fn varDeclaration(self: *Self) !bool {
+        if (self.match(.@"var") == null)
+            return false;
 
-            if (self.match(.equal)) |_| {
-                try self.expression();
-                if (self.match(.semicolon) == null) return error.Syntax;
-                try self.addData(.var_decl_init, .{ .index = variable_index });
-            } else {
-                if (self.match(.semicolon) == null) return error.Syntax;
-                try self.addData(.var_decl, .{ .index = variable_index });
-            }
-        } else try self.statement();
+        const identifier = self.match(.identifier) orelse return error.Syntax;
+        const identifier_index_result = try self.identifiers.getOrPut(self.allocator, identifier.lexeme);
+        const identifier_index = identifier_index_result.index;
+
+        var variable_index: usize = undefined;
+        if (self.findVariableIndex(identifier_index, self.current_frame_base)) |index| {
+            variable_index = index;
+        } else {
+            try self.frame_variables.append(self.allocator, identifier_index);
+            variable_index = self.frame_variables.items.len - 1;
+        }
+
+        if (self.match(.equal)) |_| {
+            try self.expression();
+            if (self.match(.semicolon) == null) return error.Syntax;
+            try self.addData(.var_decl_init, .{ .index = variable_index });
+        } else {
+            if (self.match(.semicolon) == null) return error.Syntax;
+            try self.addData(.var_decl, .{ .index = variable_index });
+        }
+
+        return true;
     }
 
     fn statement(self: *Self) !void {
@@ -172,15 +180,62 @@ const Parser = struct {
             // while branch target starts here
             const while_target_index = self.tags_list.items.len;
             self.data_list.items[while_branch_op_index] = .{ .index = while_target_index };
+        } else if (self.match(.@"for")) |_| {
+            if (self.match(.left_paren) == null) return error.Syntax;
+
+            if (self.match(.semicolon) == null and
+                !try self.varDeclaration())
+                try self.expressionStatement();
+
+            const eval_op_index = self.tags_list.items.len;
+
+            const maybe_for_branch_op_index = if (self.match(.semicolon) == null) blk: {
+                try self.expression();
+                if (self.match(.semicolon) == null) return error.Syntax;
+
+                const for_branch_op_index = self.tags_list.items.len;
+                try self.addData(.branch_cond_false, undefined);
+                break :blk for_branch_op_index;
+            } else null;
+
+            const maybe_incr_op_index =
+                if (self.match(.right_paren) == null) blk: {
+                    const incr_jump_op_index = self.tags_list.items.len;
+                    try self.addData(.branch_uncond, undefined);
+
+                    const incr_op_index = self.tags_list.items.len;
+                    try self.expression();
+                    if (self.match(.right_paren) == null) return error.Syntax;
+
+                    try self.addData(.branch_uncond, .{ .index = eval_op_index });
+
+                    const for_shadow_op_index = self.tags_list.items.len;
+                    self.data_list.items[incr_jump_op_index] = .{ .index = for_shadow_op_index };
+
+                    break :blk incr_op_index;
+                } else null;
+
+            try self.statement();
+
+            if (maybe_incr_op_index) |incr_op_index| {
+                try self.addData(.branch_uncond, .{ .index = incr_op_index });
+            } else try self.addData(.branch_uncond, .{ .index = eval_op_index });
+
+            if (maybe_for_branch_op_index) |for_branch_op_index| {
+                const for_branch_target_index = self.tags_list.items.len;
+                self.data_list.items[for_branch_op_index] = .{ .index = for_branch_target_index };
+            }
         } else if (self.match(.print)) |_| { // print statement
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;
             try self.addEmpty(.print);
-        } else { // expression statement
-            try self.expression();
-            if (self.match(.semicolon) == null) return error.Syntax;
-            try self.addEmpty(.discard);
-        }
+        } else try self.expressionStatement();
+    }
+
+    fn expressionStatement(self: *Self) !void {
+        try self.expression();
+        if (self.match(.semicolon) == null) return error.Syntax;
+        try self.addEmpty(.discard);
     }
 
     fn expression(self: *Self) error{ OutOfMemory, Syntax }!void {
