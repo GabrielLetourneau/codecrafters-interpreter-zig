@@ -1,43 +1,42 @@
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const assert = std.debug.assert;
 
-pub const NodeShape = enum { primary, unary, literal, binary };
+pub const RootSymbol = enum { program, expression };
 
 pub const NodeTag = enum(u8) {
-    // Primary expressions, no data
+    // Primary expressions: no child, no data
     nil,
     true,
     false,
-    undefined,
+    empty,
 
-    // Unary expressions, no data
-    group = 0x10,
+    // Unary expressions: one child, no data
+    group,
     not,
     unary_minus,
-
-    // Statements, child expression, no data
-    discard,
     print,
+    block,
 
-    // Literal expressions
-    number = 0x20,
+    // Data expressions: no child, data
+    number,
     string,
-
-    // Statement, data
-    alloc_frame, // data is new frame variable count
-    free_frame,
-    var_decl, // data is variable index
+    var_decl,
     variable,
-    branch_uncond, // data is jump target
-    branch_cond_false,
-    branch_cond_or,
-    branch_cond_and,
 
-    // Statements, child expression, data
+    // Bindings: one child, identifier data
     var_decl_init,
     assignment,
 
-    // Binary expressions
-    multiply = 0x30,
+    // Binary expressions: data points to left-hand child, immediate child is right-hand child
+    declarations, // lhs is .empty or declaration; rhs is single declaration
+    @"if",
+    @"else",
+    @"while",
+    for_init_cond,
+    for_preamble,
+    @"for",
+    multiply,
     divide,
     add,
     substract,
@@ -47,12 +46,10 @@ pub const NodeTag = enum(u8) {
     less_equal,
     equal,
     not_equal,
+    @"or",
+    @"and",
 
     const Self = @This();
-
-    fn shape(self: Self) NodeShape {
-        return @enumFromInt(@intFromEnum(self) >> 4);
-    }
 
     fn shortString(self: Self) []const u8 {
         return switch (self) {
@@ -80,86 +77,142 @@ pub const Data = union {
 
 tags: []const NodeTag, // whole tree, in postfix order
 data: []const Data, // relevant data in same order as tags
-string_starts: []const usize, // pointer to start of string; end of string is followin entry
+string_starts: []const usize, // pointer to start of string; end of string is following entry
 strings: []const u8, // internalized strings
 
 const Ast = @This();
 
-pub fn deinit(self: Ast, allocator: std.mem.Allocator) void {
+pub fn deinitStrings(self: Ast, allocator: Allocator) void {
     allocator.free(self.strings);
     allocator.free(self.string_starts);
+}
+
+pub fn deinit(self: Ast, allocator: Allocator) void {
     allocator.free(self.data);
     allocator.free(self.tags);
 }
 
 pub const Node = struct {
-    ast: Ast,
-    index: usize,
+    ast: *const Ast,
+    tag_index: usize,
 
     const Self = @This();
 
     pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        const tag = self.ast.tags[self.index];
-        const short_string = tag.shortString();
-        switch (tag.shape()) {
-            .primary => try writer.writeAll(short_string),
-            .unary => try writer.print("({s} {s})", .{ short_string, self.onlyChild() }),
-            .literal => switch (tag) {
-                .number => try @import("number.zig").format(self.number(), writer),
-                .string => try writer.writeAll(self.string()),
-                else => unreachable,
+        switch (self.tag()) {
+            .nil, .true, .false => try writer.writeAll(self.tag().shortString()),
+            .empty => {},
+            .group, .not, .unary_minus, .print => try writer.print("({s} {s})", .{ self.tag().shortString(), self.onlyChild() }),
+            .block => try writer.print("{{{s}\n}}", .{self.onlyChild()}),
+            .number => try @import("number.zig").format(self.number(), writer),
+            .string => try writer.writeAll(self.string()),
+            .var_decl, .variable => try writer.print("({s} {d})", .{ self.tag().shortString(), self.identifier() }),
+            .var_decl_init, .assignment => try writer.print("({s} {d} {s})", .{ self.tag().shortString(), self.identifier(), self.onlyChild() }),
+            .declarations => try writer.print("{s}\n{s}", .{ self.leftChild(), self.rightChild() }),
+            .@"if", .@"while" => try writer.print(
+                "{s} ({s}) {s}",
+                .{
+                    self.tag().shortString(),
+                    self.leftChild(),
+                    self.rightChild(),
+                },
+            ),
+            .@"else" => {
+                const if_statement = self.leftChild();
+                try writer.print(
+                    "if ({s}) {s} else {s}",
+                    .{ if_statement.leftChild(), if_statement.rightChild(), self.rightChild() },
+                );
             },
-            .binary => try writer.print("({s} {s} {s})", .{ short_string, self.leftChild(), self.rightChild() }),
+            .@"for" => {
+                const for_preamble = self.leftChild();
+                const for_cond_init = for_preamble.leftChild();
+                try writer.print(
+                    "for ({s}; {s}; {s}) {s}",
+                    .{
+                        for_cond_init.leftChild(),
+                        for_cond_init.rightChild(),
+                        for_preamble.rightChild(),
+                        self.rightChild(),
+                    },
+                );
+            },
+            else => try writer.print("({s} {s} {s})", .{ self.tag().shortString(), self.leftChild(), self.rightChild() }),
         }
     }
 
-    pub fn dataIndex(self: Self) usize {
+    pub fn tag(self: Self) NodeTag {
+        return self.ast.tags[self.tag_index];
+    }
+
+    pub fn identifier(self: Self) usize {
+        assert(switch (self.tag()) {
+            .var_decl, .variable, .var_decl_init, .assignment => true,
+            else => false,
+        });
+
         return self.data().index;
     }
 
-    pub fn string(self: Self) []const u8 {
-        const index = self.data().index;
-        const start = self.ast.string_starts[index];
-        const end = self.ast.string_starts[index + 1];
-        return self.ast.strings[start..end];
+    pub fn stringIndex(self: Self) usize {
+        assert(self.tag() == .string);
+
+        return self.data().index;
     }
 
     pub fn number(self: Self) f64 {
+        assert(self.tag() == .number);
+
         return self.data().number;
     }
 
+    pub fn onlyChild(self: Self) Self {
+        assert(switch (self.tag()) {
+            .group, .not, .unary_minus, .print, .block, .var_decl_init, .assignment => true,
+            else => false,
+        });
+
+        return .{
+            .ast = self.ast,
+            .tag_index = self.tag_index - 1,
+        };
+    }
+
+    pub fn leftChild(self: Self) Self {
+        assert(@intFromEnum(self.tag()) >= @intFromEnum(NodeTag.declarations));
+
+        return .{
+            .ast = self.ast,
+            .tag_index = self.data().index,
+        };
+    }
+
+    pub fn rightChild(self: Self) Self {
+        assert(@intFromEnum(self.tag()) >= @intFromEnum(NodeTag.declarations));
+
+        return .{
+            .ast = self.ast,
+            .tag_index = self.tag_index - 1,
+        };
+    }
+
+    fn string(self: Self) []const u8 {
+        const index_data = self.stringIndex();
+        const start = self.ast.string_starts[index_data];
+        const end = self.ast.string_starts[index_data + 1];
+        return self.ast.strings[start..end];
+    }
+
     fn data(self: Self) Data {
-        return self.ast.data[self.index];
-    }
-
-    fn onlyChild(self: Self) Self {
-        return self.rightChild();
-    }
-
-    fn leftChild(self: Self) Self {
-        return .{
-            .ast = self.ast,
-            .index = self.data().index,
-        };
-    }
-
-    fn rightChild(self: Self) Self {
-        return .{
-            .ast = self.ast,
-            .index = self.index - 1,
-        };
+        return self.ast.data[self.tag_index];
     }
 };
 
-pub fn node(self: Ast, index: usize) Node {
-    return .{ .ast = self, .index = index };
-}
-
-pub fn root(self: Ast) ?Node {
+pub fn root(self: *const Ast) ?Node {
     if (self.tags.len == 0) return null;
 
     return .{
         .ast = self,
-        .index = self.tags.len - 1,
+        .tag_index = self.tags.len - 1,
     };
 }

@@ -4,15 +4,12 @@ const Allocator = std.mem.Allocator;
 const Ast = @import("Ast.zig");
 const Scanner = @import("Scanner.zig");
 
-pub const RootSymbol = enum { program, expression };
-
-pub fn parse(allocator: Allocator, file_contents: []const u8, root_symbol: RootSymbol) !Ast {
+pub fn parse(allocator: Allocator, file_contents: []const u8, root_symbol: Ast.RootSymbol) !Ast {
     var parser: Parser = .{
         .scanner = .{ .source = file_contents },
         .allocator = allocator,
     };
     defer {
-        parser.frame_variables.deinit(allocator);
         parser.identifiers.deinit(allocator);
         parser.start_index_of_strings.deinit(allocator);
     }
@@ -61,24 +58,21 @@ const Parser = struct {
     start_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
 
     identifiers: std.StringArrayHashMapUnmanaged(void) = std.StringArrayHashMapUnmanaged(void).empty,
-    frame_variables: std.ArrayListUnmanaged(usize) = .{},
-    current_frame_base: usize = 0,
 
     next_token: ?Scanner.Token = null,
 
     const Self = @This();
 
     fn program(self: *Self) !void {
-
-        // global variable frame
-        try self.addData(.alloc_frame, .{ .index = 0 });
+        try self.addEmpty(.empty);
 
         while (self.nextToken()) |_| {
-            try self.declaration();
-        }
+            const lhs_index = self.lastNodeIndex();
 
-        // global frame variable count
-        self.data_list.items[0] = .{ .index = self.frame_variables.items.len };
+            try self.declaration();
+
+            try self.addIndexed(.declarations, lhs_index);
+        }
     }
 
     fn declaration(self: *Self) error{ OutOfMemory, Syntax }!void {
@@ -91,24 +85,15 @@ const Parser = struct {
             return false;
 
         const identifier = self.match(.identifier) orelse return error.Syntax;
-        const identifier_index_result = try self.identifiers.getOrPut(self.allocator, identifier.lexeme);
-        const identifier_index = identifier_index_result.index;
-
-        var variable_index: usize = undefined;
-        if (self.findVariableIndex(identifier_index, self.current_frame_base)) |index| {
-            variable_index = index;
-        } else {
-            try self.frame_variables.append(self.allocator, identifier_index);
-            variable_index = self.frame_variables.items.len - 1;
-        }
+        const identifier_index = try self.getIdentifierIndex(identifier.lexeme);
 
         if (self.match(.equal)) |_| {
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;
-            try self.addData(.var_decl_init, .{ .index = variable_index });
+            try self.addIndexed(.var_decl_init, identifier_index);
         } else {
             if (self.match(.semicolon) == null) return error.Syntax;
-            try self.addData(.var_decl, .{ .index = variable_index });
+            try self.addIndexed(.var_decl, identifier_index);
         }
 
         return true;
@@ -116,115 +101,79 @@ const Parser = struct {
 
     fn statement(self: *Self) !void {
         if (self.match(.left_brace)) |_| { // block
-            const old_frame_base = self.current_frame_base;
-            self.current_frame_base = self.frame_variables.items.len;
+            try self.addEmpty(.empty);
 
-            const alloc_frame_op_index = self.tags_list.items.len;
-            try self.addData(.alloc_frame, undefined); // push new frame, full size will be found later
+            while (self.match(.right_brace) == null) {
+                const lhs_index = self.lastNodeIndex();
 
-            while (self.match(.right_brace) == null)
                 try self.declaration();
 
-            const frame_size = self.frame_variables.items.len - self.current_frame_base;
-            self.data_list.items[alloc_frame_op_index] = .{ .index = frame_size };
+                try self.addIndexed(.declarations, lhs_index);
+            }
 
-            try self.addData(.free_frame, .{ .index = frame_size }); // pop frame
-            self.frame_variables.shrinkRetainingCapacity(self.current_frame_base);
-            self.current_frame_base = old_frame_base;
+            try self.addEmpty(.block);
         } else if (self.match(.@"if")) |_| {
             if (self.match(.left_paren) == null) return error.Syntax;
             try self.expression();
             if (self.match(.right_paren) == null) return error.Syntax;
-
-            const if_branch_op_index = self.tags_list.items.len;
-            try self.addData(.branch_cond_false, undefined);
+            var lhs_index = self.lastNodeIndex();
 
             // if shadow
             try self.statement();
 
+            try self.addIndexed(.@"if", lhs_index);
+
             if (self.match(.@"else")) |_| {
-                // at end of if shadow, unconditionnaly jump to past else shadow
-                const else_branch_op_index = self.tags_list.items.len;
-                try self.addData(.branch_uncond, undefined);
+                lhs_index = self.lastNodeIndex();
 
-                // if branch target starts here
-                const if_target_index = self.tags_list.items.len;
-                self.data_list.items[if_branch_op_index] = .{ .index = if_target_index };
-
-                // else shadow
                 try self.statement();
 
-                const else_target_index = self.tags_list.items.len;
-                self.data_list.items[else_branch_op_index] = .{ .index = else_target_index };
-            } else {
-                // if branch target starts here
-                const if_target_index = self.tags_list.items.len;
-                self.data_list.items[if_branch_op_index] = .{ .index = if_target_index };
+                try self.addIndexed(.@"else", lhs_index);
             }
         } else if (self.match(.@"while")) |_| {
-            const eval_op_index = self.tags_list.items.len;
-
             if (self.match(.left_paren) == null) return error.Syntax;
             try self.expression();
             if (self.match(.right_paren) == null) return error.Syntax;
-
-            const while_branch_op_index = self.tags_list.items.len;
-            try self.addData(.branch_cond_false, undefined);
+            const lhs_index = self.lastNodeIndex();
 
             // while shadow
             try self.statement();
 
-            // loop back to condition evaluation
-            try self.addData(.branch_uncond, .{ .index = eval_op_index });
-
-            // while branch target starts here
-            const while_target_index = self.tags_list.items.len;
-            self.data_list.items[while_branch_op_index] = .{ .index = while_target_index };
+            try self.addIndexed(.@"while", lhs_index);
         } else if (self.match(.@"for")) |_| {
             if (self.match(.left_paren) == null) return error.Syntax;
 
-            if (self.match(.semicolon) == null and
-                !try self.varDeclaration())
+            if (self.match(.semicolon)) |_| {
+                try self.addEmpty(.empty);
+            } else if (!try self.varDeclaration())
                 try self.expressionStatement();
+            var lhs_index = self.lastNodeIndex();
 
-            const eval_op_index = self.tags_list.items.len;
-
-            const maybe_for_branch_op_index = if (self.match(.semicolon) == null) blk: {
+            if (self.match(.semicolon)) |_| {
+                try self.addEmpty(.empty);
+            } else {
                 try self.expression();
                 if (self.match(.semicolon) == null) return error.Syntax;
+            }
 
-                const for_branch_op_index = self.tags_list.items.len;
-                try self.addData(.branch_cond_false, undefined);
-                break :blk for_branch_op_index;
-            } else null;
+            try self.addIndexed(.for_init_cond, lhs_index);
+            lhs_index = self.lastNodeIndex();
 
-            const maybe_incr_op_index =
-                if (self.match(.right_paren) == null) blk: {
-                    const incr_jump_op_index = self.tags_list.items.len;
-                    try self.addData(.branch_uncond, undefined);
+            if (self.match(.right_paren)) |_| {
+                try self.addEmpty(.empty);
+            } else {
+                try self.expression();
+                if (self.match(.right_paren) == null) return error.Syntax;
+            }
 
-                    const incr_op_index = self.tags_list.items.len;
-                    try self.expression();
-                    if (self.match(.right_paren) == null) return error.Syntax;
+            try self.addIndexed(.for_preamble, lhs_index);
+            lhs_index = self.lastNodeIndex();
 
-                    try self.addData(.branch_uncond, .{ .index = eval_op_index });
-
-                    const for_shadow_op_index = self.tags_list.items.len;
-                    self.data_list.items[incr_jump_op_index] = .{ .index = for_shadow_op_index };
-
-                    break :blk incr_op_index;
-                } else null;
-
+            // for shadow
             try self.statement();
 
-            if (maybe_incr_op_index) |incr_op_index| {
-                try self.addData(.branch_uncond, .{ .index = incr_op_index });
-            } else try self.addData(.branch_uncond, .{ .index = eval_op_index });
-
-            if (maybe_for_branch_op_index) |for_branch_op_index| {
-                const for_branch_target_index = self.tags_list.items.len;
-                self.data_list.items[for_branch_op_index] = .{ .index = for_branch_target_index };
-            }
+            try self.addIndexed(.@"for", lhs_index);
+            try self.addEmpty(.block); // simplifies handling of variable declaration in code gen
         } else if (self.match(.print)) |_| { // print statement
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;
@@ -235,7 +184,6 @@ const Parser = struct {
     fn expressionStatement(self: *Self) !void {
         try self.expression();
         if (self.match(.semicolon) == null) return error.Syntax;
-        try self.addEmpty(.discard);
     }
 
     fn expression(self: *Self) error{ OutOfMemory, Syntax }!void {
@@ -246,17 +194,17 @@ const Parser = struct {
         try self.@"or"();
 
         if (self.match(.equal) != null) {
-            const left_index = self.tags_list.items.len - 1;
-            if (self.tags_list.items[left_index] != .variable)
+            const lhs_index = self.lastNodeIndex();
+            if (self.tags_list.items[lhs_index] != .variable)
                 return error.Syntax;
 
-            // Back off from the variable op, we will push an assignment on top of the right-hand side
+            // Cancel off the variable node, we will push an assignment on top of the right-hand side
             _ = self.tags_list.pop();
             const variable_index = self.data_list.pop().?.index;
 
             try self.assignment();
 
-            try self.addData(.assignment, .{ .index = variable_index });
+            try self.addIndexed(.assignment, variable_index);
         }
     }
 
@@ -264,13 +212,11 @@ const Parser = struct {
         try self.@"and"();
 
         while (self.match(.@"or")) |_| {
-            const or_branch_op_index = self.tags_list.items.len;
-            try self.addData(.branch_cond_or, undefined);
+            const lhs_index = self.lastNodeIndex();
 
             try self.@"and"();
 
-            const or_target_index = self.tags_list.items.len;
-            self.data_list.items[or_branch_op_index] = .{ .index = or_target_index };
+            try self.addIndexed(.@"or", lhs_index);
         }
     }
 
@@ -278,13 +224,11 @@ const Parser = struct {
         try self.equality();
 
         while (self.match(.@"and")) |_| {
-            const and_branch_op_index = self.tags_list.items.len;
-            try self.addData(.branch_cond_and, undefined);
+            const lhs_index = self.lastNodeIndex();
 
             try self.equality();
 
-            const or_target_index = self.tags_list.items.len;
-            self.data_list.items[and_branch_op_index] = .{ .index = or_target_index };
+            try self.addIndexed(.@"and", lhs_index);
         }
     }
 
@@ -324,7 +268,6 @@ const Parser = struct {
         comptime tag_mappings: []const struct { token_tag: Scanner.TokenTag, node_tag: Ast.NodeTag },
     ) error{ OutOfMemory, Syntax }!void {
         try constituent(self);
-        var leftChildIndex = self.tags_list.items.len - 1;
 
         while (true) {
             const tag: Ast.NodeTag = blk: {
@@ -332,10 +275,11 @@ const Parser = struct {
                     if (self.match(tag_mapping.token_tag) != null) break :blk tag_mapping.node_tag;
                 return;
             };
+            const lhs_index = self.lastNodeIndex();
 
             try constituent(self);
-            try self.addData(tag, .{ .index = leftChildIndex });
-            leftChildIndex = self.tags_list.items.len - 1;
+
+            try self.addIndexed(tag, lhs_index);
         }
     }
 
@@ -375,7 +319,7 @@ const Parser = struct {
                 try self.string_indexes_list.append(self.allocator, end);
             }
             const string_index = start_index_result.value_ptr.*;
-            try self.addData(.string, .{ .index = string_index });
+            try self.addIndexed(.string, string_index);
         } else if (self.match(.left_paren) != null) {
             try self.expression();
 
@@ -384,13 +328,8 @@ const Parser = struct {
 
             try self.addEmpty(.group);
         } else if (self.match(.identifier)) |identifier| {
-            if (self.identifiers.getIndex(identifier.lexeme)) |identifier_index| {
-                if (self.findVariableIndex(identifier_index, 0)) |variable_index| {
-                    try self.addData(.variable, .{ .index = variable_index });
-                    return;
-                }
-            }
-            try self.addEmpty(.undefined);
+            const identifier_index = try self.getIdentifierIndex(identifier.lexeme);
+            try self.addIndexed(.variable, identifier_index);
         } else return error.Syntax;
     }
 
@@ -402,6 +341,10 @@ const Parser = struct {
             return token;
         }
         return null;
+    }
+
+    fn lastNodeIndex(self: Self) usize {
+        return self.tags_list.items.len - 1;
     }
 
     fn nextToken(self: *Self) ?Scanner.Token {
@@ -426,13 +369,14 @@ const Parser = struct {
         try self.data_list.append(self.allocator, data);
     }
 
-    fn findVariableIndex(self: Self, identifier_index: usize, base_index: usize) ?usize {
-        var variable_index = self.frame_variables.items.len;
-        while (variable_index > base_index) {
-            variable_index -= 1;
-            if (self.frame_variables.items[variable_index] == identifier_index)
-                return variable_index;
-        } else return null;
+    fn addIndexed(self: *Self, tag: Ast.NodeTag, index: usize) !void {
+        try self.addData(tag, .{ .index = index });
+    }
+
+    fn getIdentifierIndex(self: *Self, identifier: []const u8) !usize {
+        const identifier_index_result =
+            try self.identifiers.getOrPut(self.allocator, identifier);
+        return identifier_index_result.index;
     }
 };
 
@@ -441,7 +385,10 @@ fn testParse(source: []const u8, parsed: []const u8) !void {
     const allocator = testing.allocator;
 
     const ast = try parse(allocator, source, .expression);
-    defer ast.deinit(allocator);
+    defer {
+        ast.deinitStrings(allocator);
+        ast.deinit(allocator);
+    }
 
     if (ast.root()) |node| {
         const actual = try std.fmt.allocPrint(allocator, "{s}", .{node});
