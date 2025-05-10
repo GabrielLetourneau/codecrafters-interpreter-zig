@@ -43,6 +43,7 @@ const Generator = struct {
 
     frame_variables: std.ArrayListUnmanaged(usize) = .{},
     frame_base: usize = 0,
+    frame_top: usize = 0,
 
     const Self = @This();
 
@@ -60,17 +61,19 @@ const Generator = struct {
             .block => try self.block(node.onlyChild()),
 
             .var_decl => {
-                const variable = self.findVariableIndex(node.identifier(), self.frame_base).?;
                 try self.addEmpty(.nil);
-                try self.addIndexed(.assignment, variable);
-                try self.addEmpty(.discard);
+                if (try self.getOrPutVariable(node.identifier(), self.frame_base)) |variable| {
+                    try self.addIndexed(.assignment, variable);
+                    try self.addEmpty(.discard);
+                } else try self.addEmpty(.alloc);
             },
 
             .var_decl_init => {
-                const variable = self.findVariableIndex(node.identifier(), self.frame_base).?;
                 try self.expression(node.onlyChild());
-                try self.addIndexed(.assignment, variable);
-                try self.addEmpty(.discard);
+                if (try self.getOrPutVariable(node.identifier(), self.frame_base)) |variable| {
+                    try self.addIndexed(.assignment, variable);
+                    try self.addEmpty(.discard);
+                } else try self.addEmpty(.alloc);
             },
 
             .declarations => {
@@ -150,37 +153,15 @@ const Generator = struct {
         const old_frame_base = self.frame_base;
         self.frame_base = self.frame_variables.items.len;
 
-        const variable_count = try self.allocateVariables(node);
-        if (variable_count > 0)
-            try self.addIndexed(.alloc_frame, variable_count);
-
         try self.statement(node);
 
+        const variable_count = self.frame_variables.items.len - self.frame_base;
         if (variable_count > 0) {
             try self.addIndexed(.free_frame, variable_count);
             self.frame_variables.shrinkRetainingCapacity(self.frame_base);
         }
 
         self.frame_base = old_frame_base;
-    }
-
-    fn allocateVariables(self: *Self, node: Ast.Node) !usize {
-        return switch (node.tag()) {
-            .var_decl, .var_decl_init => blk: {
-                const identifier = node.identifier();
-                if (self.findVariableIndex(identifier, self.frame_base)) |_| {
-                    break :blk 0;
-                } else {
-                    try self.frame_variables.append(self.allocator, identifier);
-                    break :blk 1;
-                }
-            },
-            .declarations => try self.allocateVariables(node.leftChild()) +
-                try self.allocateVariables(node.rightChild()),
-            // drills down to init expression
-            .@"for" => try self.allocateVariables(node.leftChild().leftChild().leftChild()),
-            else => 0,
-        };
     }
 
     fn expression(self: *Self, node: Ast.Node) error{OutOfMemory}!void {
@@ -203,7 +184,10 @@ const Generator = struct {
             .number => try self.addData(.number, .{ .number = node.number() }),
             .string => try self.addIndexed(.string, node.stringIndex()),
             .variable => {
-                if (self.findVariableIndex(node.identifier(), 0)) |variable| {
+                const identifier = node.identifier();
+                if (identifier == 0) { // clock
+                    try self.addEmpty(.clock);
+                } else if (self.findVariable(node.identifier(), 0)) |variable| {
                     try self.addIndexed(.variable, variable);
                 } else {
                     try self.addEmpty(.undefined);
@@ -213,12 +197,25 @@ const Generator = struct {
             .assignment => {
                 try self.expression(node.onlyChild());
 
-                if (self.findVariableIndex(node.identifier(), 0)) |variable| {
+                if (self.findVariable(node.identifier(), 0)) |variable| {
                     try self.addIndexed(.assignment, variable);
                 } else {
                     try self.addEmpty(.discard);
                     try self.addEmpty(.undefined);
                 }
+            },
+
+            .call => {
+                var arguments = node.rightChild();
+                var arguments_count: usize = 0;
+                while (arguments.tag() != .empty) : (arguments = node.leftChild()) {
+                    try self.expression(arguments.rightChild());
+                    arguments_count += 1;
+                }
+
+                try self.expression(node.leftChild());
+
+                try self.addIndexed(.call, arguments_count);
             },
 
             .multiply => try self.binary(node, .multiply),
@@ -288,11 +285,19 @@ const Generator = struct {
         try self.data_list.append(self.allocator, data);
     }
 
-    fn findVariableIndex(self: Self, identifier_index: usize, base_index: usize) ?usize {
+    fn getOrPutVariable(self: *Self, identifier: usize, base_index: usize) !?usize {
+        if (self.findVariable(identifier, base_index)) |variable|
+            return variable;
+
+        try self.frame_variables.append(self.allocator, identifier);
+        return null;
+    }
+
+    fn findVariable(self: Self, identifier: usize, base_index: usize) ?usize {
         var variable_index = self.frame_variables.items.len;
         while (variable_index > base_index) {
             variable_index -= 1;
-            if (self.frame_variables.items[variable_index] == identifier_index)
+            if (self.frame_variables.items[variable_index] == identifier)
                 return variable_index;
         } else return null;
     }

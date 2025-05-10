@@ -3,7 +3,6 @@ const assert = std.debug.assert;
 
 pub const OpCode = enum(u8) {
     // No effect on evaluation stack
-    alloc_frame,
     free_frame,
     branch_uncond,
 
@@ -16,6 +15,7 @@ pub const OpCode = enum(u8) {
     string,
 
     variable,
+    clock,
 
     // Unary operation; pops one value, pushes one
     not,
@@ -27,9 +27,11 @@ pub const OpCode = enum(u8) {
     @"and",
 
     // Consuming operation; pops one value, pushes none
+    alloc,
     discard,
     print,
     branch_cond_not,
+    call,
 
     // Binary operation; pops two values, pushes one
     multiply = 0x30,
@@ -75,13 +77,19 @@ pub const Instruction = struct {
     }
 
     pub fn size(self: Self) usize {
-        assert(self.op() == .alloc_frame or self.op() == .free_frame);
+        assert(switch (self.op()) {
+            .free_frame, .call => true,
+            else => false,
+        });
 
         return self.index();
     }
 
     pub fn variable(self: Self) usize {
-        assert(self.op() == .variable or self.op() == .assignment);
+        assert(switch (self.op()) {
+            .assignment, .variable => true,
+            else => false,
+        });
 
         return self.index();
     }

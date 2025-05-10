@@ -30,6 +30,8 @@ pub const NodeTag = enum(u8) {
 
     // Binary expressions: data points to left-hand child, immediate child is right-hand child
     declarations, // lhs is .empty or declaration; rhs is single declaration
+    arguments,
+    call,
     @"if",
     @"else",
     @"while",

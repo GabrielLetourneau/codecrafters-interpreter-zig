@@ -8,13 +8,14 @@ pub const Value = union(enum) {
     nil: void,
     true: void,
     false: void,
+    clock: void,
     number: f64,
     internal_string: []const u8,
     heap_string: *HeapObject,
 
     pub fn format(self: Value, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
         switch (self) {
-            .nil, .true, .false => try writer.writeAll(@tagName(self)),
+            .nil, .true, .false, .clock => try writer.writeAll(@tagName(self)),
             .number => |number| try writer.print("{d}", .{number}),
             .internal_string, .heap_string => try writer.writeAll(self.string()),
         }
@@ -49,6 +50,7 @@ pub const HeapObjectTag = enum {
     nil,
     true,
     false,
+    clock,
     number,
     internal_string,
     heap_string,
@@ -76,6 +78,7 @@ pub const HeapObject = struct {
             .nil => .{ .nil = {} },
             .true => .{ .true = {} },
             .false => .{ .false = {} },
+            .clock => .{ .clock = {} },
             .number => .{ .number = self.data.number },
             .internal_string => .{ .internal_string = self.data.internal_string },
             .heap_string => .{ .heap_string = self.data.heap_string },
@@ -95,6 +98,10 @@ pub const HeapObject = struct {
             },
             .false => {
                 self.tag = .false;
+                self.data = .{ .empty = {} };
+            },
+            .clock => {
+                self.tag = .clock;
                 self.data = .{ .empty = {} };
             },
             .number => |number| {
@@ -128,7 +135,7 @@ out: Writer,
 
 heap: std.heap.MemoryPool(HeapObject),
 
-variables_stack: std.ArrayListUnmanaged(?*HeapObject),
+variables_stack: std.ArrayListUnmanaged(*HeapObject),
 
 tags_stack: std.ArrayListUnmanaged(ValueTag),
 data_stack: std.ArrayListUnmanaged(StackData),
@@ -160,9 +167,8 @@ pub fn deinit(self: *Self) void {
     self.data_stack.deinit(self.allocator);
     self.tags_stack.deinit(self.allocator);
 
-    while (self.variables_stack.pop()) |maybe_variable|
-        if (maybe_variable) |variable|
-            self.decrementRef(variable);
+    while (self.variables_stack.pop()) |variable|
+        self.decrementRef(variable);
     self.variables_stack.deinit(self.allocator);
 
     self.heap.deinit();
@@ -172,19 +178,16 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
     var inst = start;
     while (!inst.finished()) : (inst = inst.next()) {
         sw: switch (inst.op()) {
-            .alloc_frame => {
-                const frame_size = inst.size();
-                try self.variables_stack.appendNTimes(self.allocator, null, frame_size);
-            },
             .free_frame => {
                 var frame_size = inst.size();
                 while (frame_size != 0) : (frame_size -= 1)
-                    if (self.variables_stack.pop().?) |variable|
-                        self.decrementRef(variable);
+                    self.decrementRef(self.variables_stack.pop().?);
             },
             .branch_uncond => {
                 inst = inst.target();
-                continue :sw inst.op();
+                if (inst.finished()) {
+                    break;
+                } else continue :sw inst.op();
             },
 
             .nil => try self.push(.nil),
@@ -195,9 +198,10 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
             .string => try self.push(.{ .internal_string = inst.string() }),
             .variable => {
                 const variable_index = inst.variable();
-                const variable = self.variables_stack.items[variable_index] orelse return error.Semantics;
+                const variable = self.variables_stack.items[variable_index];
                 try self.push(variable.value());
             },
+            .clock => try self.push(.clock),
 
             .not => {
                 const value = self.pop();
@@ -217,8 +221,18 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 const value = self.pop();
                 defer self.free(value);
 
-                const variable_index = inst.variable();
-                try self.setVariable(variable_index, value);
+                const variable = self.variables_stack.items[inst.variable()];
+
+                const maybe_existing_heap_string = switch (variable.tag) {
+                    .heap_string => variable.data.heap_string,
+                    else => null,
+                };
+
+                variable.setValue(value);
+
+                if (maybe_existing_heap_string) |heap_string|
+                    self.decrementRef(heap_string);
+
                 try self.push(value);
             },
 
@@ -243,6 +257,15 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 }
             },
 
+            .alloc => {
+                const value = self.pop();
+                defer self.free(value);
+
+                const variable = try self.heap.create();
+                variable.ref_count = 1;
+                variable.setValue(value);
+                try self.variables_stack.append(self.allocator, variable);
+            },
             .discard => self.free(self.pop()),
             .print => {
                 const value = self.pop();
@@ -256,8 +279,20 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                 if (!value.truthy()) {
                     inst = inst.target();
-                    continue :sw inst.op();
+                    if (inst.finished()) {
+                        break;
+                    } else continue :sw inst.op();
                 }
+            },
+            .call => {
+                const value = self.pop();
+                defer self.free(value);
+
+                if (value != .clock or inst.size() != 0) return error.Semantics;
+
+                const time_in_nanoseconds: f64 = @floatFromInt(std.time.nanoTimestamp());
+                const time_in_seconds: f64 = time_in_nanoseconds / @as(f64, @floatFromInt(std.time.ns_per_s));
+                try self.push(.{ .number = time_in_seconds });
             },
 
             .multiply => try self.binary(multiply),
@@ -292,7 +327,7 @@ pub fn free(self: *Self, value: Value) void {
 fn push(self: *Self, value: Value) !void {
     try self.tags_stack.append(self.allocator, std.meta.activeTag(value));
     switch (value) {
-        .nil, .true, .false => {},
+        .nil, .true, .false, .clock => {},
         .number => |number| try self.data_stack.append(self.allocator, .{ .number = number }),
         .internal_string => |string| {
             try self.data_stack.append(self.allocator, .{ .string_ptr = string.ptr });
@@ -325,6 +360,7 @@ fn pop(self: *Self) Value {
         .nil => .{ .nil = {} },
         .true => .{ .true = {} },
         .false => .{ .false = {} },
+        .clock => .{ .clock = {} },
         .number => .{ .number = self.data_stack.pop().?.number },
         .internal_string => blk: {
             const len = self.data_stack.pop().?.string_len;
@@ -444,6 +480,7 @@ fn isEqual(left: Value, right: Value) bool {
         .nil => right == .nil,
         .true => right == .true,
         .false => right == .false,
+        .clock => right == .clock,
         .number => |left_number| switch (right) {
             .number => |right_number| left_number == right_number,
             else => false,
@@ -453,25 +490,6 @@ fn isEqual(left: Value, right: Value) bool {
             else => false,
         },
     };
-}
-
-fn setVariable(self: *Self, variable_index: usize, value: Value) !void {
-    if (self.variables_stack.items[variable_index]) |variable| {
-        const maybe_existing_heap_string = switch (variable.tag) {
-            .heap_string => variable.data.heap_string,
-            else => null,
-        };
-
-        variable.setValue(value);
-
-        if (maybe_existing_heap_string) |heap_string|
-            self.decrementRef(heap_string);
-    } else {
-        const variable = try self.heap.create();
-        variable.ref_count = 1;
-        variable.setValue(value);
-        self.variables_stack.items[variable_index] = variable;
-    }
 }
 
 fn testEvaluate(source: []const u8, expected: []const u8) !void {
@@ -667,10 +685,9 @@ test "control flow" {
     );
     try testRun(
         \\if (true) print "if branch"; else print "else branch";
-        \\if (false) print "if branch"; else print "else branch";
+        \\if (false) print "if branch"; else if (false) print "else-if branch";
     ,
         \\if branch
-        \\else branch
         \\
     );
     try testRun(
@@ -730,4 +747,24 @@ test "control flow" {
         \\1
         \\
     );
+    try testRun(
+        \\ var foo = "after";
+        \\ {
+        \\   var foo = "before";
+        \\
+        \\   for (var foo = 0; foo < 1; foo = foo + 1) {
+        \\     print foo;
+        \\     var foo = -1;
+        \\     print foo;
+        \\   }
+        \\ }
+    ,
+        \\0
+        \\-1
+        \\
+    );
+}
+
+test "functions" {
+    try testRun("print (clock() > 1746902501);", "true\n");
 }

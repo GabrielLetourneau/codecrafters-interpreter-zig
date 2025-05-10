@@ -64,6 +64,8 @@ const Parser = struct {
     const Self = @This();
 
     fn program(self: *Self) !void {
+        try self.identifiers.put(self.allocator, "clock", {});
+
         try self.addEmpty(.empty);
 
         while (self.nextToken()) |_| {
@@ -288,13 +290,35 @@ const Parser = struct {
             if (self.match(.bang) != null) break :blk .not;
             if (self.match(.minus) != null) break :blk .unary_minus;
 
-            try self.primary();
+            try self.call();
             return;
         };
 
         try self.unary();
 
         try self.addEmpty(tag);
+    }
+
+    fn call(self: *Self) !void {
+        try self.primary();
+
+        if (self.match(.left_paren) == null) return;
+
+        const lhs_index = self.lastNodeIndex();
+
+        try self.addEmpty(.empty);
+
+        if (self.match(.right_paren) == null) {
+            while (true) {
+                try self.expression();
+
+                if (self.match(.comma) == null) break;
+            }
+
+            if (self.match(.right_paren) == null) return error.Syntax;
+        }
+
+        try self.addIndexed(.call, lhs_index);
     }
 
     fn primary(self: *Self) !void {
@@ -409,6 +433,7 @@ test "parse primary expressions" {
 
 test "parse unary expressions" {
     try testParse("!true", "(! true)");
+    try testParse("!!35", "(! (! 35.0))");
 }
 
 test "parse binary expressions" {
