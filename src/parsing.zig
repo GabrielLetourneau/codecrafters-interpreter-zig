@@ -10,7 +10,6 @@ pub fn parse(allocator: Allocator, file_contents: []const u8, root_symbol: Ast.R
         .allocator = allocator,
     };
     defer {
-        parser.identifiers.deinit(allocator);
         parser.start_index_of_strings.deinit(allocator);
     }
     errdefer {
@@ -57,14 +56,12 @@ const Parser = struct {
     string_buffer: std.ArrayListUnmanaged(u8) = .{},
     start_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
 
-    identifiers: std.StringArrayHashMapUnmanaged(void) = std.StringArrayHashMapUnmanaged(void).empty,
-
     next_token: ?Scanner.Token = null,
 
     const Self = @This();
 
     fn program(self: *Self) !void {
-        try self.identifiers.put(self.allocator, "clock", {});
+        _ = try self.getStringStartIndex("clock");
 
         try self.addEmpty(.empty);
 
@@ -78,8 +75,36 @@ const Parser = struct {
     }
 
     fn declaration(self: *Self) error{ OutOfMemory, Syntax }!void {
-        if (!try self.varDeclaration())
-            try self.statement();
+        if (try self.funDeclaration() or
+            try self.varDeclaration())
+            return;
+
+        try self.statement();
+    }
+
+    fn funDeclaration(self: *Self) !bool {
+        if (self.match(.fun) == null)
+            return false;
+
+        const identifier = self.match(.identifier) orelse
+            return error.Syntax;
+        const identifier_index = try self.getStringStartIndex(identifier.lexeme);
+
+        if (self.match(.left_paren) == null or
+            self.match(.right_paren) == null)
+            return error.Syntax;
+
+        try self.addEmpty(.empty);
+        const lhs_index = self.lastNodeIndex();
+
+        if (!try self.block())
+            return error.Syntax;
+
+        try self.addIndexed(.fun_def, lhs_index);
+
+        try self.addIndexed(.fun_decl, identifier_index);
+
+        return true;
     }
 
     fn varDeclaration(self: *Self) !bool {
@@ -87,7 +112,7 @@ const Parser = struct {
             return false;
 
         const identifier = self.match(.identifier) orelse return error.Syntax;
-        const identifier_index = try self.getIdentifierIndex(identifier.lexeme);
+        const identifier_index = try self.getStringStartIndex(identifier.lexeme);
 
         if (self.match(.equal)) |_| {
             try self.expression();
@@ -101,20 +126,30 @@ const Parser = struct {
         return true;
     }
 
+    fn block(self: *Self) !bool {
+        if (self.match(.left_brace) == null)
+            return false;
+
+        try self.addEmpty(.empty);
+
+        while (self.match(.right_brace) == null) {
+            const lhs_index = self.lastNodeIndex();
+
+            try self.declaration();
+
+            try self.addIndexed(.declarations, lhs_index);
+        }
+
+        try self.addEmpty(.block);
+
+        return true;
+    }
+
     fn statement(self: *Self) !void {
-        if (self.match(.left_brace)) |_| { // block
-            try self.addEmpty(.empty);
+        if (try self.block())
+            return;
 
-            while (self.match(.right_brace) == null) {
-                const lhs_index = self.lastNodeIndex();
-
-                try self.declaration();
-
-                try self.addIndexed(.declarations, lhs_index);
-            }
-
-            try self.addEmpty(.block);
-        } else if (self.match(.@"if")) |_| {
+        if (self.match(.@"if")) |_| {
             if (self.match(.left_paren) == null) return error.Syntax;
             try self.expression();
             if (self.match(.right_paren) == null) return error.Syntax;
@@ -180,6 +215,14 @@ const Parser = struct {
             try self.expression();
             if (self.match(.semicolon) == null) return error.Syntax;
             try self.addEmpty(.print);
+        } else if (self.match(.@"return")) |_| {
+            if (self.match(.semicolon)) |_| {
+                try self.addEmpty(.nil);
+            } else {
+                try self.expression();
+                if (self.match(.semicolon) == null) return error.Syntax;
+            }
+            try self.addEmpty(.@"return");
         } else try self.expressionStatement();
     }
 
@@ -331,19 +374,8 @@ const Parser = struct {
         } else if (self.match(.number)) |token| {
             try self.addData(.number, .{ .number = token.literal.number });
         } else if (self.match(.string)) |token| {
-            const string = token.literal.string;
-            const start_index_result = try self.start_index_of_strings.getOrPut(self.allocator, string);
-            if (!start_index_result.found_existing) {
-                try self.string_buffer.appendSlice(self.allocator, string);
-                const end = self.string_buffer.items.len;
-
-                start_index_result.key_ptr.* = string;
-                start_index_result.value_ptr.* = self.string_indexes_list.items.len - 1;
-
-                try self.string_indexes_list.append(self.allocator, end);
-            }
-            const string_index = start_index_result.value_ptr.*;
-            try self.addIndexed(.string, string_index);
+            const string_start_index = try self.getStringStartIndex(token.literal.string);
+            try self.addIndexed(.string, string_start_index);
         } else if (self.match(.left_paren) != null) {
             try self.expression();
 
@@ -352,7 +384,7 @@ const Parser = struct {
 
             try self.addEmpty(.group);
         } else if (self.match(.identifier)) |identifier| {
-            const identifier_index = try self.getIdentifierIndex(identifier.lexeme);
+            const identifier_index = try self.getStringStartIndex(identifier.lexeme);
             try self.addIndexed(.variable, identifier_index);
         } else return error.Syntax;
     }
@@ -397,10 +429,18 @@ const Parser = struct {
         try self.addData(tag, .{ .index = index });
     }
 
-    fn getIdentifierIndex(self: *Self, identifier: []const u8) !usize {
-        const identifier_index_result =
-            try self.identifiers.getOrPut(self.allocator, identifier);
-        return identifier_index_result.index;
+    fn getStringStartIndex(self: *Self, string: []const u8) !usize {
+        const start_index_result = try self.start_index_of_strings.getOrPut(self.allocator, string);
+        if (!start_index_result.found_existing) {
+            try self.string_buffer.appendSlice(self.allocator, string);
+            const end = self.string_buffer.items.len;
+
+            start_index_result.key_ptr.* = string;
+            start_index_result.value_ptr.* = self.string_indexes_list.items.len - 1;
+
+            try self.string_indexes_list.append(self.allocator, end);
+        }
+        return start_index_result.value_ptr.*;
     }
 };
 

@@ -58,20 +58,46 @@ const Generator = struct {
                 try self.expression(node.onlyChild());
                 try self.addEmpty(.print);
             },
+            .@"return" => {
+                try self.expression(node.onlyChild());
+                try self.addEmpty(.@"return");
+            },
             .block => try self.block(node.onlyChild()),
 
             .var_decl => {
                 try self.addEmpty(.nil);
                 if (try self.getOrPutVariable(node.identifier(), self.frame_base)) |variable| {
-                    try self.addIndexed(.assignment, variable);
+                    try self.addIndexed(.assign, variable);
+                    try self.addEmpty(.discard);
+                } else try self.addEmpty(.alloc);
+            },
+            .var_decl_init => {
+                try self.expression(node.onlyChild());
+                if (try self.getOrPutVariable(node.identifier(), self.frame_base)) |variable| {
+                    try self.addIndexed(.assign, variable);
                     try self.addEmpty(.discard);
                 } else try self.addEmpty(.alloc);
             },
 
-            .var_decl_init => {
-                try self.expression(node.onlyChild());
-                if (try self.getOrPutVariable(node.identifier(), self.frame_base)) |variable| {
-                    try self.addIndexed(.assignment, variable);
+            .fun_decl => {
+                const jump_op_index = try self.addForwardBranch(.branch_uncond);
+
+                const fun_start_index = self.nextOpIndex();
+
+                // TODO move this down when we have proper function framing.
+                const maybe_variable = try self.getOrPutVariable(node.identifier(), self.frame_base);
+
+                try self.block(node.onlyChild().rightChild().onlyChild());
+                try self.addEmpty(.nil);
+                try self.addEmpty(.@"return");
+
+                self.setBranchTargetHere(jump_op_index);
+
+                try self.addIndexed(.string, node.identifier());
+                try self.addIndexed(.def_fun, fun_start_index);
+
+                if (maybe_variable) |variable| {
+                    try self.addIndexed(.assign, variable);
                     try self.addEmpty(.discard);
                 } else try self.addEmpty(.alloc);
             },
@@ -198,7 +224,7 @@ const Generator = struct {
                 try self.expression(node.onlyChild());
 
                 if (self.findVariable(node.identifier(), 0)) |variable| {
-                    try self.addIndexed(.assignment, variable);
+                    try self.addIndexed(.assign, variable);
                 } else {
                     try self.addEmpty(.discard);
                     try self.addEmpty(.undefined);

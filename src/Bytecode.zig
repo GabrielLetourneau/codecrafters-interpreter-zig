@@ -20,7 +20,8 @@ pub const OpCode = enum(u8) {
     // Unary operation; pops one value, pushes one
     not,
     unary_minus,
-    assignment,
+    assign,
+    def_fun,
 
     // Logical operator; pops one value, may push it back
     @"or",
@@ -44,6 +45,7 @@ pub const OpCode = enum(u8) {
     less_equal,
     equal,
     not_equal,
+    @"return",
 };
 
 pub const Data = union {
@@ -87,7 +89,7 @@ pub const Instruction = struct {
 
     pub fn variable(self: Self) usize {
         assert(switch (self.op()) {
-            .assignment, .variable => true,
+            .assign, .variable => true,
             else => false,
         });
 
@@ -118,7 +120,7 @@ pub const Instruction = struct {
 
     pub fn target(self: Self) Instruction {
         assert(switch (self.op()) {
-            .branch_uncond, .@"or", .@"and", .branch_cond_not => true,
+            .branch_uncond, .def_fun, .@"or", .@"and", .branch_cond_not => true,
             else => false,
         });
 

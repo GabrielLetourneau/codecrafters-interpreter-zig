@@ -16,6 +16,7 @@ pub const NodeTag = enum(u8) {
     not,
     unary_minus,
     print,
+    @"return",
     block,
 
     // Data expressions: no child, data
@@ -23,15 +24,19 @@ pub const NodeTag = enum(u8) {
     string,
     var_decl,
     variable,
+    parameter,
 
     // Bindings: one child, identifier data
     var_decl_init,
     assignment,
+    fun_decl,
 
     // Binary expressions: data points to left-hand child, immediate child is right-hand child
     declarations, // lhs is .empty or declaration; rhs is single declaration
     arguments,
     call,
+    fun_def,
+    parameters,
     @"if",
     @"else",
     @"while",
@@ -149,7 +154,7 @@ pub const Node = struct {
 
     pub fn identifier(self: Self) usize {
         assert(switch (self.tag()) {
-            .var_decl, .variable, .var_decl_init, .assignment => true,
+            .var_decl, .variable, .var_decl_init, .assignment, .fun_decl => true,
             else => false,
         });
 
@@ -170,7 +175,7 @@ pub const Node = struct {
 
     pub fn onlyChild(self: Self) Self {
         assert(switch (self.tag()) {
-            .group, .not, .unary_minus, .print, .block, .var_decl_init, .assignment => true,
+            .group, .not, .unary_minus, .print, .@"return", .block, .var_decl_init, .assignment, .fun_decl => true,
             else => false,
         });
 
