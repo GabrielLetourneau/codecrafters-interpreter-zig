@@ -219,7 +219,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
             .string => try self.push(.{ .internal_string = inst.string() }),
             .variable => {
                 const variable_index = inst.variable();
-                const variable = self.variables_stack.items[variable_index];
+                const variable = self.variableAtIndex(variable_index);
                 try self.push(variable.value());
             },
             .clock => try self.push(.clock),
@@ -242,7 +242,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 const value = self.pop();
                 defer self.free(value);
 
-                const variable = self.variables_stack.items[inst.variable()];
+                const variable = self.variableAtIndex(inst.variable());
 
                 const maybe_existing_heap_string = switch (variable.tag) {
                     .heap_string => variable.data.heap_string,
@@ -290,16 +290,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 }
             },
 
-            .alloc => {
-                const value = self.pop();
-                defer self.free(value);
-
-                const variable = try self.heap.create();
-                errdefer self.heap.destroy(variable);
-                variable.ref_count = 1;
-                variable.setValue(value);
-                try self.variables_stack.append(self.allocator, variable);
-            },
+            .alloc => try self.alloc(),
             .discard => self.free(self.pop()),
             .print => {
                 const value = self.pop();
@@ -322,15 +313,16 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 const value = self.pop();
                 defer self.free(value);
 
-                if (inst.size() != 0) return error.Semantics;
-
                 switch (value) {
                     .clock => {
+                        if (inst.size() != 0) return error.Semantics;
                         const time_in_nanoseconds: f64 = @floatFromInt(std.time.nanoTimestamp());
                         const time_in_seconds: f64 = time_in_nanoseconds / @as(f64, @floatFromInt(std.time.ns_per_s));
                         try self.push(.{ .number = time_in_seconds });
                     },
                     .function => |function| {
+                        for (0..inst.size()) |_|
+                            try self.alloc();
                         try self.push(.{ .jump_target = inst.next().op_index });
                         inst = .{ .bytecode = inst.bytecode, .op_index = function.op_index };
                         continue :sw inst.op();
@@ -396,6 +388,22 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
             else => {},
         }
     }
+}
+
+fn alloc(self: *Self) !void {
+    const value = self.pop();
+    defer self.free(value);
+
+    const variable = try self.heap.create();
+    errdefer self.heap.destroy(variable);
+    variable.ref_count = 1;
+    variable.setValue(value);
+    try self.variables_stack.append(self.allocator, variable);
+}
+
+fn variableAtIndex(self: Self, variable_index: usize) *HeapObject {
+    const variable_items = self.variables_stack.items;
+    return variable_items[variable_items.len - variable_index];
 }
 
 fn push(self: *Self, value: Value) !void {
@@ -874,6 +882,39 @@ test "functions" {
     ,
         \\The cumulative sum from 1 to 10 is: 
         \\55
+        \\
+    );
+    try testRun(
+        \\fun foo(a) { print a; }
+        \\foo(10);
+    ,
+        \\10
+        \\
+    );
+    try testRun(
+        \\fun calculateGrade(score, bonus) {
+        \\  var finalScore = score + bonus;
+        \\
+        \\  if (finalScore >= 90) {
+        \\    print "A";
+        \\  } else if (finalScore >= 80) {
+        \\    print "B";
+        \\  } else if (finalScore >= 70) {
+        \\    print "C";
+        \\  } else if (finalScore >= 60) {
+        \\    print "D";
+        \\  } else {
+        \\    print "F";
+        \\  }
+        \\}
+        \\
+        \\var score = 81;
+        \\var bonus = 3;
+        \\print "Grade for given score is: ";
+        \\calculateGrade(score, bonus);
+    ,
+        \\Grade for given score is: 
+        \\B
         \\
     );
 }

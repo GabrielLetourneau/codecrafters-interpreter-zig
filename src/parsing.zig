@@ -90,11 +90,23 @@ const Parser = struct {
             return error.Syntax;
         const identifier_index = try self.getStringStartIndex(identifier.lexeme);
 
-        if (self.match(.left_paren) == null or
-            self.match(.right_paren) == null)
+        if (self.match(.left_paren) == null)
             return error.Syntax;
 
         try self.addEmpty(.empty);
+
+        while (self.match(.identifier)) |param_identifier| {
+            const param_identifier_index = try self.getStringStartIndex(param_identifier.lexeme);
+            try self.addIndexed(.parameter, param_identifier_index);
+
+            if (self.match(.right_paren)) |_|
+                break;
+
+            if (self.match(.comma) == null)
+                return error.Syntax;
+        } else if (self.match(.right_paren) == null)
+            return error.Syntax;
+
         const lhs_index = self.lastNodeIndex();
 
         if (!try self.block())
@@ -353,7 +365,11 @@ const Parser = struct {
 
         if (self.match(.right_paren) == null) {
             while (true) {
+                const arguments_lhs_index = self.lastNodeIndex();
+
                 try self.expression();
+
+                try self.addIndexed(.arguments, arguments_lhs_index);
 
                 if (self.match(.comma) == null) break;
             }

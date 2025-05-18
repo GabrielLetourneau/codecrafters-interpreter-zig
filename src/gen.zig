@@ -43,7 +43,6 @@ const Generator = struct {
 
     frame_variables: std.ArrayListUnmanaged(usize) = .{},
     frame_base: usize = 0,
-    frame_top: usize = 0,
 
     const Self = @This();
 
@@ -66,14 +65,18 @@ const Generator = struct {
 
             .var_decl => {
                 try self.addEmpty(.nil);
-                if (try self.getOrPutVariable(node.identifier(), self.frame_base)) |variable| {
+                if (try self.getOrPutVariable(node.identifier())) |variable| {
                     try self.addIndexed(.assign, variable);
                     try self.addEmpty(.discard);
                 } else try self.addEmpty(.alloc);
             },
+            .parameter => {
+                try self.statement(node.onlyChild());
+                _ = try self.getOrPutVariable(node.identifier());
+            },
             .var_decl_init => {
                 try self.expression(node.onlyChild());
-                if (try self.getOrPutVariable(node.identifier(), self.frame_base)) |variable| {
+                if (try self.getOrPutVariable(node.identifier())) |variable| {
                     try self.addIndexed(.assign, variable);
                     try self.addEmpty(.discard);
                 } else try self.addEmpty(.alloc);
@@ -84,10 +87,7 @@ const Generator = struct {
 
                 const fun_start_index = self.nextOpIndex();
 
-                // TODO move this down when we have proper function framing.
-                const maybe_variable = try self.getOrPutVariable(node.identifier(), self.frame_base);
-
-                try self.block(node.onlyChild().rightChild().onlyChild());
+                try self.block(node.onlyChild());
                 try self.addEmpty(.nil);
                 try self.addEmpty(.@"return");
 
@@ -96,7 +96,7 @@ const Generator = struct {
                 try self.addIndexed(.string, node.identifier());
                 try self.addIndexed(.def_fun, fun_start_index);
 
-                if (maybe_variable) |variable| {
+                if (try self.getOrPutVariable(node.identifier())) |variable| {
                     try self.addIndexed(.assign, variable);
                     try self.addEmpty(.discard);
                 } else try self.addEmpty(.alloc);
@@ -105,6 +105,10 @@ const Generator = struct {
             .declarations => {
                 try self.statement(node.leftChild());
                 try self.statement(node.rightChild());
+            },
+            .fun_def => {
+                try self.statement(node.leftChild());
+                try self.statement(node.rightChild().onlyChild());
             },
             .@"if" => {
                 try self.expression(node.leftChild());
@@ -234,7 +238,7 @@ const Generator = struct {
             .call => {
                 var arguments = node.rightChild();
                 var arguments_count: usize = 0;
-                while (arguments.tag() != .empty) : (arguments = node.leftChild()) {
+                while (arguments.tag() != .empty) : (arguments = arguments.leftChild()) {
                     try self.expression(arguments.rightChild());
                     arguments_count += 1;
                 }
@@ -311,8 +315,8 @@ const Generator = struct {
         try self.data_list.append(self.allocator, data);
     }
 
-    fn getOrPutVariable(self: *Self, identifier: usize, base_index: usize) !?usize {
-        if (self.findVariable(identifier, base_index)) |variable|
+    fn getOrPutVariable(self: *Self, identifier: usize) !?usize {
+        if (self.findVariable(identifier, self.frame_base)) |variable|
             return variable;
 
         try self.frame_variables.append(self.allocator, identifier);
@@ -320,11 +324,12 @@ const Generator = struct {
     }
 
     fn findVariable(self: Self, identifier: usize, base_index: usize) ?usize {
-        var variable_index = self.frame_variables.items.len;
+        const variables_top = self.frame_variables.items.len;
+        var variable_index = variables_top;
         while (variable_index > base_index) {
             variable_index -= 1;
             if (self.frame_variables.items[variable_index] == identifier)
-                return variable_index;
+                return variables_top - variable_index;
         } else return null;
     }
 };

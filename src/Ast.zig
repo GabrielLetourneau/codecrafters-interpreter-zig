@@ -36,7 +36,6 @@ pub const NodeTag = enum(u8) {
     arguments,
     call,
     fun_def,
-    parameters,
     @"if",
     @"else",
     @"while",
@@ -154,7 +153,7 @@ pub const Node = struct {
 
     pub fn identifier(self: Self) usize {
         assert(switch (self.tag()) {
-            .var_decl, .variable, .var_decl_init, .assignment, .fun_decl => true,
+            .var_decl, .variable, .parameter, .var_decl_init, .assignment, .fun_decl => true,
             else => false,
         });
 
@@ -175,7 +174,7 @@ pub const Node = struct {
 
     pub fn onlyChild(self: Self) Self {
         assert(switch (self.tag()) {
-            .group, .not, .unary_minus, .print, .@"return", .block, .var_decl_init, .assignment, .fun_decl => true,
+            .group, .not, .unary_minus, .print, .@"return", .block, .parameter, .var_decl_init, .assignment, .fun_decl => true,
             else => false,
         });
 
