@@ -13,18 +13,10 @@ pub const Value = union(enum) {
     internal_string: []const u8,
     heap_string: *HeapObject,
     jump_target: usize,
-    function: FunctionDefinition,
+    function: Function,
 
-    pub fn format(self: Value, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
-        switch (self) {
-            .nil, .true, .false, .clock => try writer.writeAll(@tagName(self)),
-            .number => |number| try writer.print("{d}", .{number}),
-            .internal_string, .heap_string => try writer.writeAll(self.string()),
-            .jump_target => try writer.writeAll("<jmp>"),
-            .function => |function| {
-                try writer.print("<fn {s}>", .{function.name.string()});
-            },
-        }
+    pub fn inContext(self: Value, bytecode: *const Bytecode) ValueInContext {
+        return .{ .bytecode = bytecode, .value = self };
     }
 
     fn string(self: Value) []const u8 {
@@ -52,9 +44,29 @@ pub const Value = union(enum) {
 
 const ValueTag = std.meta.Tag(Value);
 
-pub const FunctionDefinition = struct {
-    op_index: usize,
-    name: *HeapObject,
+pub const ValueInContext = struct {
+    bytecode: *const Bytecode,
+    value: Value,
+
+    pub fn format(self: ValueInContext, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+        const value = self.value;
+        switch (value) {
+            .nil, .true, .false, .clock => try writer.writeAll(@tagName(value)),
+            .number => |number| try writer.print("{d}", .{number}),
+            .internal_string, .heap_string => try writer.writeAll(value.string()),
+            .jump_target => |target| try writer.print("<jmp {d}>", .{target}),
+            .function => |function| {
+                const bytecode = self.bytecode;
+                const string_start_index = bytecode.function_names[function.function_index];
+                try writer.print("<fn {s}>", .{bytecode.stringAtIndex(string_start_index)});
+            },
+        }
+    }
+};
+
+pub const Function = struct {
+    function_index: usize,
+    capture: ?*HeapObject,
 };
 
 pub const HeapObjectTag = enum {
@@ -68,6 +80,7 @@ pub const HeapObjectTag = enum {
     string_buffer,
     string_prefix,
     function,
+    capture,
 };
 
 pub const HeapObject = struct {
@@ -96,6 +109,7 @@ pub const HeapObject = struct {
             .heap_string => .{ .heap_string = self.data.heap_string },
             .string_buffer, .string_prefix => unreachable,
             .function => .{ .function = self.data.function },
+            .capture => unreachable,
         };
     }
 
@@ -134,6 +148,8 @@ pub const HeapObject = struct {
             .function => |function| {
                 self.tag = .function;
                 self.data = .{ .function = function };
+                if (function.capture) |capture|
+                    capture.ref_count += 1;
             },
         }
     }
@@ -146,7 +162,8 @@ pub const HeapData = union {
     heap_string: *HeapObject,
     string_buffer: []u8,
     string_prefix: struct { object: *HeapObject, len: usize },
-    function: FunctionDefinition,
+    function: Function,
+    capture: struct { variable: *HeapObject, next: ?*HeapObject },
 };
 
 allocator: Allocator,
@@ -167,7 +184,8 @@ const StackData = union {
     string_len: usize,
     object: *HeapObject,
     op_index: usize,
-    identifier: usize,
+    function_index: usize,
+    capture: ?*HeapObject,
 };
 
 pub fn init(allocator: Allocator, out: Writer) Self {
@@ -223,6 +241,12 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 try self.push(variable.value());
             },
             .clock => try self.push(.clock),
+            .def_fun => {
+                try self.push(.{ .function = .{
+                    .function_index = inst.functionIndex(),
+                    .capture = null,
+                } });
+            },
 
             .not => {
                 const value = self.pop();
@@ -256,17 +280,24 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                 try self.push(value);
             },
-            .def_fun => {
-                const name_value = self.pop();
-                const name_object = try self.heap.create();
-                errdefer self.heap.destroy(name_object);
-                name_object.ref_count = 1;
-                name_object.setValue(name_value);
+            .capture => {
+                var value = self.pop();
+                defer self.free(value);
 
-                try self.push(.{ .function = .{
-                    .op_index = inst.target().op_index,
-                    .name = name_object,
-                } });
+                const captured_variable = self.variableAtIndex(inst.variable());
+                captured_variable.ref_count += 1;
+
+                const capture = try self.heap.create();
+                capture.tag = .capture;
+                capture.ref_count = 1;
+                capture.data = .{ .capture = .{
+                    .variable = captured_variable,
+                    .next = value.function.capture,
+                } };
+
+                value.function.capture = capture;
+
+                try self.push(value);
             },
 
             .@"or" => {
@@ -290,13 +321,13 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 }
             },
 
-            .alloc => try self.alloc(),
+            .alloc => try self.allocVariable(),
             .discard => self.free(self.pop()),
             .print => {
                 const value = self.pop();
                 defer self.free(value);
 
-                try self.out.print("{s}\n", .{value});
+                try self.out.print("{s}\n", .{value.inContext(inst.bytecode)});
             },
             .branch_cond_not => {
                 const value = self.pop();
@@ -321,10 +352,25 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                         try self.push(.{ .number = time_in_seconds });
                     },
                     .function => |function| {
-                        for (0..inst.size()) |_|
-                            try self.alloc();
+                        const function_def = inst.bytecode.function_defs[function.function_index];
+
+                        if (inst.size() != function_def.param_count) return error.Semantics;
+
+                        var maybe_capture = function.capture;
+                        while (maybe_capture) |capture| {
+                            const capture_data = capture.data.capture;
+                            const variable = capture_data.variable;
+                            variable.ref_count += 1;
+                            try self.variables_stack.append(self.allocator, variable);
+                            maybe_capture = capture_data.next;
+                        }
+
+                        for (0..function_def.param_count) |_|
+                            try self.allocVariable();
+
                         try self.push(.{ .jump_target = inst.next().op_index });
-                        inst = .{ .bytecode = inst.bytecode, .op_index = function.op_index };
+
+                        inst = .{ .bytecode = inst.bytecode, .op_index = function_def.op_index };
                         continue :sw inst.op();
                     },
                     else => return error.Semantics,
@@ -348,6 +394,11 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                 const return_target = self.pop();
 
+                for (0..inst.size()) |_| {
+                    const variable = self.variables_stack.pop().?;
+                    self.decrementRef(variable);
+                }
+
                 try self.push(return_value);
 
                 inst = .{ .bytecode = inst.bytecode, .op_index = return_target.jump_target };
@@ -369,7 +420,8 @@ pub fn free(self: *Self, value: Value) void {
             self.decrementRef(object);
         },
         .function => |function| {
-            self.decrementRef(function.name);
+            if (function.capture) |capture|
+                self.decrementRef(capture);
         },
         else => {},
     }
@@ -385,12 +437,16 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
             .heap_string => self.decrementRef(object_copy.data.heap_string),
             .string_buffer => self.allocator.free(object_copy.data.string_buffer),
             .string_prefix => self.decrementRef(object_copy.data.string_prefix.object),
+            .function => if (object_copy.data.function.capture) |capture|
+                self.decrementRef(capture),
+            .capture => if (object_copy.data.capture.next) |capture|
+                self.decrementRef(capture),
             else => {},
         }
     }
 }
 
-fn alloc(self: *Self) !void {
+fn allocVariable(self: *Self) !void {
     const value = self.pop();
     defer self.free(value);
 
@@ -419,10 +475,11 @@ fn push(self: *Self, value: Value) !void {
             try self.data_stack.append(self.allocator, .{ .object = object });
             object.*.ref_count += 1;
         },
-        .jump_target => |op_index| try self.data_stack.append(self.allocator, .{ .op_index = op_index }),
+        .jump_target => |target| try self.data_stack.append(self.allocator, .{ .op_index = target }),
         .function => |function| {
-            try self.data_stack.append(self.allocator, .{ .op_index = function.op_index });
-            try self.data_stack.append(self.allocator, .{ .object = function.name });
+            try self.data_stack.append(self.allocator, .{ .function_index = function.function_index });
+            try self.data_stack.append(self.allocator, .{ .capture = function.capture });
+            if (function.capture) |capture| capture.*.ref_count += 1;
         },
     }
 }
@@ -442,10 +499,9 @@ fn pop(self: *Self) Value {
         .heap_string => .{ .heap_string = self.data_stack.pop().?.object },
         .jump_target => .{ .jump_target = self.data_stack.pop().?.op_index },
         .function => blk: {
-            const name = self.data_stack.pop().?.object;
-            name.ref_count += 1;
-            const op_index = self.data_stack.pop().?.op_index;
-            break :blk .{ .function = .{ .op_index = op_index, .name = name } };
+            const capture = self.data_stack.pop().?.capture;
+            const function_index = self.data_stack.pop().?.function_index;
+            break :blk .{ .function = .{ .function_index = function_index, .capture = capture } };
         },
     };
 }
@@ -570,7 +626,7 @@ fn isEqual(left: Value, right: Value) bool {
         },
         .jump_target => unreachable,
         .function => |left_function| switch (right) {
-            .function => |right_function| left_function.op_index == right_function.op_index,
+            .function => |right_function| left_function.function_index == right_function.function_index,
             else => false,
         },
     };
@@ -597,7 +653,7 @@ fn testEvaluate(source: []const u8, expected: []const u8) !void {
     const value = try runtime.evaluate(bytecode.startOp().?);
     defer runtime.free(value);
 
-    const evaluated = try std.fmt.allocPrint(allocator, "{s}", .{value});
+    const evaluated = try std.fmt.allocPrint(allocator, "{s}", .{value.inContext(&bytecode)});
     defer allocator.free(evaluated);
 
     try testing.expectEqualStrings(expected, evaluated);
@@ -915,6 +971,21 @@ test "functions" {
     ,
         \\Grade for given score is: 
         \\B
+        \\
+    );
+    try testRun(
+        \\fun fib(n) {
+        \\  if (n < 2) return n;
+        \\  return fib(n - 2) + fib(n - 1);
+        \\}
+        \\
+        \\var start = clock();
+        \\print fib(32) == 2178309;
+        \\print (clock() - start) < 50; // 5 seconds
+        \\
+    ,
+        \\true
+        \\true
         \\
     );
 }

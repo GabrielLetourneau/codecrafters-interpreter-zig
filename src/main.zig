@@ -125,7 +125,7 @@ fn evaluate(allocator: Allocator, file_contents: []const u8) !void {
     defer runtime.free(value);
 
     const out = std.io.getStdOut().writer();
-    try out.print("{s}\n", .{value});
+    try out.print("{s}\n", .{value.inContext(&bytecode)});
 }
 
 fn run(allocator: Allocator, file_contents: []const u8) !void {
