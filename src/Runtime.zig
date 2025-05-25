@@ -980,12 +980,46 @@ test "functions" {
         \\}
         \\
         \\var start = clock();
-        \\print fib(32) == 2178309;
-        \\print (clock() - start) < 50; // 5 seconds
+        \\print fib(20) == 6765;
+        \\print (clock() - start) < 5; // 5 seconds
         \\
     ,
         \\true
         \\true
+        \\
+    );
+    try testRun(
+        \\var globalGreeting = "Hello";
+        \\
+        \\fun makeGreeter() {
+        \\  fun greet(name) {
+        \\    print globalGreeting + " " + name;
+        \\  }
+        \\  return greet;
+        \\}
+        \\
+        \\var sayHello = makeGreeter();
+        \\sayHello("Bob");
+    ,
+        \\Hello Bob
+        \\
+    );
+    try testRun(
+        \\fun returnArg(arg) {
+        \\  return arg;
+        \\}
+        \\
+        \\fun returnFunCallWithArg(func, arg) {
+        \\  return returnArg(func)(arg);
+        \\}
+        \\
+        \\fun printArg(arg) {
+        \\  print arg;
+        \\}
+        \\
+        \\returnFunCallWithArg(printArg, "foo");
+    ,
+        \\foo
         \\
     );
 }

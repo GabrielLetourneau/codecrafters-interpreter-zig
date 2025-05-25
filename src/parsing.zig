@@ -357,27 +357,27 @@ const Parser = struct {
     fn call(self: *Self) !void {
         try self.primary();
 
-        if (self.match(.left_paren) == null) return;
+        while (self.match(.left_paren)) |_| {
+            const lhs_index = self.lastNodeIndex();
 
-        const lhs_index = self.lastNodeIndex();
+            try self.addEmpty(.empty);
 
-        try self.addEmpty(.empty);
+            if (self.match(.right_paren) == null) {
+                while (true) {
+                    const arguments_lhs_index = self.lastNodeIndex();
 
-        if (self.match(.right_paren) == null) {
-            while (true) {
-                const arguments_lhs_index = self.lastNodeIndex();
+                    try self.expression();
 
-                try self.expression();
+                    try self.addIndexed(.arguments, arguments_lhs_index);
 
-                try self.addIndexed(.arguments, arguments_lhs_index);
+                    if (self.match(.comma) == null) break;
+                }
 
-                if (self.match(.comma) == null) break;
+                if (self.match(.right_paren) == null) return error.Syntax;
             }
 
-            if (self.match(.right_paren) == null) return error.Syntax;
+            try self.addIndexed(.call, lhs_index);
         }
-
-        try self.addIndexed(.call, lhs_index);
     }
 
     fn primary(self: *Self) !void {
