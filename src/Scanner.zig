@@ -57,7 +57,7 @@ pub const Token = struct {
         number: f64,
     },
 
-    pub fn format(self: Token, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Token, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         for (@tagName(self.tag)) |char| {
             try writer.writeByte(std.ascii.toUpper(char));
         }
@@ -74,7 +74,7 @@ pub const Error = struct {
     line: usize,
     @"error": union(enum) { char: u8, unterminated_string: void },
 
-    pub fn format(self: Error, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Error, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("[line {d}] Error: ", .{self.line});
         switch (self.@"error") {
             .char => |char| try writer.print("Unexpected character: {c}", .{char}),
@@ -243,14 +243,14 @@ fn testScan(source: []const u8, output: []const u8, errors: []const u8) !void {
         switch (result) {
             .token => |token| {
                 if (output_iterator.next()) |expected| {
-                    const actual = try std.fmt.allocPrint(allocator, "{s}", .{token});
+                    const actual = try std.fmt.allocPrint(allocator, "{f}", .{token});
                     defer allocator.free(actual);
                     try testing.expectEqualSlices(u8, expected, actual);
                 } else try testing.expect(false);
             },
             .@"error" => |@"error"| {
                 if (errors_iterator.next()) |expected| {
-                    const actual = try std.fmt.allocPrint(allocator, "{s}", .{@"error"});
+                    const actual = try std.fmt.allocPrint(allocator, "{f}", .{@"error"});
                     defer allocator.free(actual);
                     try testing.expectEqualSlices(u8, expected, actual);
                 } else try testing.expect(false);

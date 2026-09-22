@@ -104,19 +104,19 @@ pub const Node = struct {
 
     const Self = @This();
 
-    pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         switch (self.tag()) {
             .nil, .true, .false => try writer.writeAll(self.tag().shortString()),
             .empty => {},
-            .group, .not, .unary_minus, .print => try writer.print("({s} {s})", .{ self.tag().shortString(), self.onlyChild() }),
-            .block => try writer.print("{{{s}\n}}", .{self.onlyChild()}),
+            .group, .not, .unary_minus, .print => try writer.print("({s} {f})", .{ self.tag().shortString(), self.onlyChild() }),
+            .block => try writer.print("{{{f}\n}}", .{self.onlyChild()}),
             .number => try @import("number.zig").format(self.number(), writer),
             .string => try writer.writeAll(self.string()),
             .var_decl, .variable => try writer.print("({s} {d})", .{ self.tag().shortString(), self.identifier() }),
-            .var_decl_init, .assignment => try writer.print("({s} {d} {s})", .{ self.tag().shortString(), self.identifier(), self.onlyChild() }),
-            .declarations => try writer.print("{s}\n{s}", .{ self.leftChild(), self.rightChild() }),
+            .var_decl_init, .assignment => try writer.print("({s} {d} {f})", .{ self.tag().shortString(), self.identifier(), self.onlyChild() }),
+            .declarations => try writer.print("{f}\n{f}", .{ self.leftChild(), self.rightChild() }),
             .@"if", .@"while" => try writer.print(
-                "{s} ({s}) {s}",
+                "{s} ({f}) {f}",
                 .{
                     self.tag().shortString(),
                     self.leftChild(),
@@ -126,7 +126,7 @@ pub const Node = struct {
             .@"else" => {
                 const if_statement = self.leftChild();
                 try writer.print(
-                    "if ({s}) {s} else {s}",
+                    "if ({f}) {f} else {f}",
                     .{ if_statement.leftChild(), if_statement.rightChild(), self.rightChild() },
                 );
             },
@@ -134,7 +134,7 @@ pub const Node = struct {
                 const for_preamble = self.leftChild();
                 const for_cond_init = for_preamble.leftChild();
                 try writer.print(
-                    "for ({s}; {s}; {s}) {s}",
+                    "for ({f}; {f}; {f}) {f}",
                     .{
                         for_cond_init.leftChild(),
                         for_cond_init.rightChild(),
@@ -143,7 +143,7 @@ pub const Node = struct {
                     },
                 );
             },
-            else => try writer.print("({s} {s} {s})", .{ self.tag().shortString(), self.leftChild(), self.rightChild() }),
+            else => try writer.print("({s} {f} {f})", .{ self.tag().shortString(), self.leftChild(), self.rightChild() }),
         }
     }
 

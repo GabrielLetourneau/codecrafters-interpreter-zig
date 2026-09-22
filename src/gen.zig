@@ -50,15 +50,15 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
 const Generator = struct {
     allocator: Allocator,
 
-    ops_list: std.ArrayListUnmanaged(Bytecode.OpCode) = .{},
-    data_list: std.ArrayListUnmanaged(Bytecode.Data) = .{},
+    ops_list: std.ArrayListUnmanaged(Bytecode.OpCode) = .empty,
+    data_list: std.ArrayListUnmanaged(Bytecode.Data) = .empty,
 
-    function_defs_list: std.ArrayListUnmanaged(Bytecode.FunctionDefinition) = .{},
-    function_names_list: std.ArrayListUnmanaged(usize) = .{},
+    function_defs_list: std.ArrayListUnmanaged(Bytecode.FunctionDefinition) = .empty,
+    function_names_list: std.ArrayListUnmanaged(usize) = .empty,
 
-    frame_variables: std.ArrayListUnmanaged(usize) = .{},
-    captures: std.ArrayListUnmanaged(usize) = .{},
-    returns: std.ArrayListUnmanaged(usize) = .{},
+    frame_variables: std.ArrayListUnmanaged(usize) = .empty,
+    captures: std.ArrayListUnmanaged(usize) = .empty,
+    returns: std.ArrayListUnmanaged(usize) = .empty,
 
     block_base: usize = 0,
     function_base: struct {
@@ -426,18 +426,3 @@ const Generator = struct {
         } else return null;
     }
 };
-
-fn testParse(source: []const u8, parsed: []const u8) !void {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    const ast = try generate(allocator, source, .expression);
-    defer ast.deinit(allocator);
-
-    if (ast.root()) |node| {
-        const actual = try std.fmt.allocPrint(allocator, "{s}", .{node});
-        defer allocator.free(actual);
-
-        try testing.expectEqualStrings(parsed, actual);
-    } else try testing.expect(false);
-}

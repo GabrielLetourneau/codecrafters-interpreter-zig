@@ -1,6 +1,6 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
-const Writer = std.io.AnyWriter;
+const Writer = std.Io.Writer;
 
 const Bytecode = @import("Bytecode.zig");
 
@@ -48,7 +48,7 @@ pub const ValueInContext = struct {
     bytecode: *const Bytecode,
     value: Value,
 
-    pub fn format(self: ValueInContext, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: ValueInContext, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         const value = self.value;
         switch (value) {
             .nil, .true, .false, .clock => try writer.writeAll(@tagName(value)),
@@ -167,9 +167,10 @@ pub const HeapData = union {
 };
 
 allocator: Allocator,
-out: Writer,
+io: std.Io,
+out: *Writer,
 
-heap: std.heap.MemoryPool(HeapObject),
+heap: std.heap.MemoryPool(HeapObject) = .empty,
 
 variables_stack: std.ArrayListUnmanaged(*HeapObject),
 
@@ -188,14 +189,14 @@ const StackData = union {
     capture: ?*HeapObject,
 };
 
-pub fn init(allocator: Allocator, out: Writer) Self {
+pub fn init(allocator: Allocator, io: std.Io, out: *Writer) Self {
     return .{
         .allocator = allocator,
+        .io = io,
         .out = out,
-        .tags_stack = .{},
-        .data_stack = .{},
-        .variables_stack = .{},
-        .heap = std.heap.MemoryPool(HeapObject).init(allocator),
+        .tags_stack = .empty,
+        .data_stack = .empty,
+        .variables_stack = .empty,
     };
 }
 
@@ -210,7 +211,7 @@ pub fn deinit(self: *Self) void {
         self.decrementRef(variable);
     self.variables_stack.deinit(self.allocator);
 
-    self.heap.deinit();
+    self.heap.deinit(self.allocator);
 }
 
 pub fn run(self: *Self, start: Bytecode.Instruction) !void {
@@ -287,7 +288,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 const captured_variable = self.variableAtIndex(inst.variable());
                 captured_variable.ref_count += 1;
 
-                const capture = try self.heap.create();
+                const capture = try self.heap.create(self.allocator);
                 capture.tag = .capture;
                 capture.ref_count = 1;
                 capture.data = .{ .capture = .{
@@ -327,7 +328,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 const value = self.pop();
                 defer self.free(value);
 
-                try self.out.print("{s}\n", .{value.inContext(inst.bytecode)});
+                try self.out.print("{f}\n", .{value.inContext(inst.bytecode)});
             },
             .branch_cond_not => {
                 const value = self.pop();
@@ -347,8 +348,8 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 switch (value) {
                     .clock => {
                         if (inst.size() != 0) return error.Semantics;
-                        const time_in_nanoseconds: f64 = @floatFromInt(std.time.nanoTimestamp());
-                        const time_in_seconds: f64 = time_in_nanoseconds / @as(f64, @floatFromInt(std.time.ns_per_s));
+                        const timestamp = std.Io.Timestamp.now(self.io, .real);
+                        const time_in_seconds: f64 = @as(f64, @floatFromInt(timestamp.toMicroseconds())) / @as(f64, @floatFromInt(std.time.us_per_s));
                         try self.push(.{ .number = time_in_seconds });
                     },
                     .function => |function| {
@@ -450,7 +451,7 @@ fn allocVariable(self: *Self) !void {
     const value = self.pop();
     defer self.free(value);
 
-    const variable = try self.heap.create();
+    const variable = try self.heap.create(self.allocator);
     errdefer self.heap.destroy(variable);
     variable.ref_count = 1;
     variable.setValue(value);
@@ -537,7 +538,7 @@ fn add(self: *Self, left: Value, right: Value) !void {
             @memcpy(buffer[0..left_string.len], left_string);
             @memcpy(buffer[left_string.len..], right_string);
 
-            const object = try self.heap.create();
+            const object = try self.heap.create(self.allocator);
             errdefer self.heap.destroy(object);
 
             object.tag = .string_buffer;
@@ -561,7 +562,7 @@ fn add(self: *Self, left: Value, right: Value) !void {
             buffer = try self.allocator.realloc(buffer, left_len + right_string.len);
             @memcpy(buffer[left_len..], right_string);
 
-            const object = try self.heap.create();
+            const object = try self.heap.create(self.allocator);
             errdefer self.heap.destroy(object);
 
             object.tag = .string_buffer;
@@ -647,13 +648,15 @@ fn testEvaluate(source: []const u8, expected: []const u8) !void {
     };
     defer bytecode.deinit(allocator);
 
-    var runtime = Self.init(allocator, undefined);
+    var buffer: [1024]u8 = undefined;
+    var w: std.Io.Writer = .fixed(&buffer);
+    var runtime = Self.init(allocator, std.testing.io, &w);
     defer runtime.deinit();
 
     const value = try runtime.evaluate(bytecode.startOp().?);
     defer runtime.free(value);
 
-    const evaluated = try std.fmt.allocPrint(allocator, "{s}", .{value.inContext(&bytecode)});
+    const evaluated = try std.fmt.allocPrint(allocator, "{f}", .{value.inContext(&bytecode)});
     defer allocator.free(evaluated);
 
     try testing.expectEqualStrings(expected, evaluated);
@@ -722,15 +725,15 @@ fn testRun(source: []const u8, expected: []const u8) !void {
     };
     defer bytecode.deinit(allocator);
 
-    var out_buffer = std.ArrayList(u8).init(allocator);
-    defer out_buffer.deinit();
+    var write_state = std.Io.Writer.Allocating.init(allocator);
+    defer write_state.deinit();
 
-    var runtime = Self.init(allocator, out_buffer.writer().any());
+    var runtime = Self.init(allocator, std.testing.io, &write_state.writer);
     defer runtime.deinit();
 
     try runtime.run(bytecode.startOp().?);
 
-    try testing.expectEqualStrings(expected, out_buffer.items);
+    try testing.expectEqualStrings(expected, write_state.writer.buffered());
 }
 
 test "run statements" {

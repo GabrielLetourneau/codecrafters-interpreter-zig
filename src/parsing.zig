@@ -49,11 +49,11 @@ const Parser = struct {
     scanner: Scanner,
     allocator: Allocator,
 
-    tags_list: std.ArrayListUnmanaged(Ast.NodeTag) = .{},
-    data_list: std.ArrayListUnmanaged(Ast.Data) = .{},
+    tags_list: std.ArrayListUnmanaged(Ast.NodeTag) = .empty,
+    data_list: std.ArrayListUnmanaged(Ast.Data) = .empty,
 
-    string_indexes_list: std.ArrayListUnmanaged(usize) = .{},
-    string_buffer: std.ArrayListUnmanaged(u8) = .{},
+    string_indexes_list: std.ArrayListUnmanaged(usize) = .empty,
+    string_buffer: std.ArrayListUnmanaged(u8) = .empty,
     start_index_of_strings: std.StringHashMapUnmanaged(usize) = std.StringHashMapUnmanaged(usize).empty,
 
     next_token: ?Scanner.Token = null,
@@ -471,7 +471,7 @@ fn testParse(source: []const u8, parsed: []const u8) !void {
     }
 
     if (ast.root()) |node| {
-        const actual = try std.fmt.allocPrint(allocator, "{s}", .{node});
+        const actual = try std.fmt.allocPrint(allocator, "{f}", .{node});
         defer allocator.free(actual);
 
         try testing.expectEqualStrings(parsed, actual);

@@ -2,7 +2,7 @@
   description = "A very basic flake";
 
   inputs = {
-    nixpkgs.url = "nixpkgs/nixos-unstable";
+    nixpkgs.url = "nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
   };
 
@@ -14,8 +14,8 @@
         devShells.default = pkgs.mkShell {
           packages = with pkgs; [
             lldb
-            zig
-            zls
+            zig_0_16
+            zls_0_16
           ];
         };
       }

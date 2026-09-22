@@ -78,10 +78,10 @@ pub fn deinit(self: Bytecode, allocator: std.mem.Allocator) void {
     allocator.free(self.ops);
 }
 
-pub fn format(bytecode: Bytecode, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+pub fn format(bytecode: Bytecode, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     for (0..bytecode.ops.len) |op_index| {
         const inst: Instruction = .{ .bytecode = &bytecode, .op_index = op_index };
-        try writer.print("{any}\n", .{inst});
+        try writer.print("{f}\n", .{inst});
     }
 }
 
@@ -91,7 +91,7 @@ pub const Instruction = struct {
 
     const Self = @This();
 
-    pub fn format(self: Self, comptime _: []const u8, _: std.fmt.FormatOptions, writer: anytype) !void {
+    pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{d}: {s}", .{ self.op_index, @tagName(self.op()) });
         switch (self.op()) {
             .free_frame, .branch_uncond, .variable, .assign, .capture, .@"or", .@"and", .branch_cond_not, .call, .@"return" => try writer.print(" {d}", .{self.index()}),
