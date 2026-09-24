@@ -61,6 +61,9 @@ const Generator = struct {
     returns: std.ArrayListUnmanaged(usize) = .empty,
 
     block_base: usize = 0,
+    block_depth: usize = 0, // 1 = global scope (program root); incremented on every block entry
+    declared_identifier: ?usize = null, // variable whose initializer is being compiled
+
     function_base: struct {
         variable_base: usize,
         capture_base: usize,
@@ -75,6 +78,10 @@ const Generator = struct {
 
     fn program(self: *Self, root: Ast.Node) !void {
         try self.block(root);
+    }
+
+    fn isLocalScope(self: Self) bool {
+        return self.block_depth != 1;
     }
 
     fn statement(self: *Self, node: Ast.Node) !void {
@@ -106,6 +113,10 @@ const Generator = struct {
                 self.function_defs_list.items[self.function_defs_list.items.len - 1].param_count += 1;
             },
             .var_decl_init => {
+                const old_declared_identifier = self.declared_identifier;
+                self.declared_identifier = node.identifier();
+                defer self.declared_identifier = old_declared_identifier;
+
                 try self.expression(node.onlyChild());
                 if (try self.getOrPutVariable(node.identifier())) |variable| {
                     try self.addIndexed(.assign, variable);
@@ -223,6 +234,12 @@ const Generator = struct {
                 const preamble_node = node.leftChild();
                 const cond_init_node = preamble_node.leftChild();
 
+                // Loop header variables live in their own scope.
+                const old_block_base = self.block_base;
+                self.block_base = self.frame_variables.items.len;
+                self.block_depth += 1;
+                defer self.block_depth -= 1;
+
                 try self.statement(cond_init_node.leftChild());
 
                 const cond_target = self.nextOpIndex();
@@ -241,6 +258,13 @@ const Generator = struct {
                 if (maybe_branch_op_index) |branch_op_index| {
                     self.setBranchTargetHere(branch_op_index);
                 }
+
+                const variable_count = self.frame_variables.items.len - self.block_base;
+                if (variable_count > 0) {
+                    try self.addIndexed(.free_frame, variable_count);
+                    self.frame_variables.shrinkRetainingCapacity(self.block_base);
+                }
+                self.block_base = old_block_base;
             },
 
             else => {
@@ -250,7 +274,10 @@ const Generator = struct {
         }
     }
 
-    fn block(self: *Self, node: Ast.Node) error{OutOfMemory}!void {
+    fn block(self: *Self, node: Ast.Node) error{ OutOfMemory, Semantics }!void {
+        self.block_depth += 1;
+        defer self.block_depth -= 1;
+
         const old_frame_base = self.block_base;
         self.block_base = self.frame_variables.items.len;
 
@@ -265,7 +292,7 @@ const Generator = struct {
         self.block_base = old_frame_base;
     }
 
-    fn expression(self: *Self, node: Ast.Node) error{OutOfMemory}!void {
+    fn expression(self: *Self, node: Ast.Node) error{ OutOfMemory, Semantics }!void {
         switch (node.tag()) {
             .nil => try self.addEmpty(.nil),
             .true => try self.addEmpty(.true),
@@ -286,6 +313,10 @@ const Generator = struct {
             .string => try self.addIndexed(.string, node.stringIndex()),
             .variable => {
                 const identifier = node.identifier();
+                if (identifier != 0 and
+                    identifier == self.declared_identifier and
+                    self.isLocalScope())
+                    return error.Semantics;
                 if (identifier == 0) { // clock
                     try self.addEmpty(.clock);
                 } else if (self.findVariableIndex(node.identifier(), 0)) |variable_index| {
@@ -388,9 +419,11 @@ const Generator = struct {
         try self.data_list.append(self.allocator, data);
     }
 
-    fn getOrPutVariable(self: *Self, identifier: usize) !?usize {
-        if (self.findVariableIndex(identifier, self.block_base)) |variable|
+    fn getOrPutVariable(self: *Self, identifier: usize) error{ OutOfMemory, Semantics }!?usize {
+        if (self.findVariableIndex(identifier, self.block_base)) |variable| {
+            if (self.isLocalScope()) return error.Semantics;
             return self.frame_variables.items.len - variable;
+        }
 
         try self.frame_variables.append(self.allocator, identifier);
         return null;

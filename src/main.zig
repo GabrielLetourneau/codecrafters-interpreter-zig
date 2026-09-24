@@ -83,6 +83,7 @@ fn scan(
     try out.writeAll("EOF  null\n");
 
     if (has_errors) {
+        try stdout_file_writer.flush();
         try stderr_file_writer.flush();
         std.process.exit(65);
     }
@@ -134,7 +135,14 @@ fn generate_or_exit(
 
     const root = ast.root() orelse return null;
 
-    return try generate(allocator, root, root_symbol);
+    return generate(allocator, root, root_symbol) catch |err| switch (err) {
+        error.Semantics => {
+            try stderr_file_writer.interface.writeAll("Semantics error\n");
+            try stderr_file_writer.flush();
+            std.process.exit(65);
+        },
+        else => return err,
+    };
 }
 
 fn evaluate(
@@ -153,8 +161,9 @@ fn evaluate(
     defer runtime.deinit();
 
     const value = runtime.evaluate(start) catch |err| switch (err) {
-        error.Semantics => {
-            try stderr_file_writer.interface.writeAll("Semantics error\n");
+        error.Runtime => {
+            try stdout_file_writer.flush();
+            try stderr_file_writer.interface.writeAll("Runtime error\n");
             try stderr_file_writer.flush();
             std.process.exit(70);
         },
@@ -181,8 +190,9 @@ fn run(
     defer runtime.deinit();
 
     runtime.run(start) catch |err| switch (err) {
-        error.Semantics => {
-            try stderr_file_writer.interface.writeAll("Semantics error\n");
+        error.Runtime => {
+            try stdout_file_writer.flush();
+            try stderr_file_writer.interface.writeAll("Runtime error\n");
             try stderr_file_writer.flush();
             std.process.exit(70);
         },

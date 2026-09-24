@@ -3,6 +3,7 @@ const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
 
 const Bytecode = @import("Bytecode.zig");
+const Ast = @import("Ast.zig");
 
 pub const Value = union(enum) {
     nil: void,
@@ -37,7 +38,7 @@ pub const Value = union(enum) {
     fn checkedNumber(self: Value) !f64 {
         return switch (self) {
             .number => |number| number,
-            else => error.Semantics,
+            else => error.Runtime,
         };
     }
 };
@@ -233,7 +234,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
             .nil => try self.push(.nil),
             .true => try self.push(.true),
             .false => try self.push(.false),
-            .undefined => return error.Semantics,
+            .undefined => return error.Runtime,
             .number => try self.push(.{ .number = inst.number() }),
             .string => try self.push(.{ .internal_string = inst.string() }),
             .variable => {
@@ -347,7 +348,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                 switch (value) {
                     .clock => {
-                        if (inst.size() != 0) return error.Semantics;
+                        if (inst.size() != 0) return error.Runtime;
                         const timestamp = std.Io.Timestamp.now(self.io, .real);
                         const time_in_seconds: f64 = @as(f64, @floatFromInt(timestamp.toMicroseconds())) / @as(f64, @floatFromInt(std.time.us_per_s));
                         try self.push(.{ .number = time_in_seconds });
@@ -355,7 +356,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                     .function => |function| {
                         const function_def = inst.bytecode.function_defs[function.function_index];
 
-                        if (inst.size() != function_def.param_count) return error.Semantics;
+                        if (inst.size() != function_def.param_count) return error.Runtime;
 
                         var maybe_capture = function.capture;
                         while (maybe_capture) |capture| {
@@ -374,7 +375,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                         inst = .{ .bytecode = inst.bytecode, .op_index = function_def.op_index };
                         continue :sw inst.op();
                     },
-                    else => return error.Semantics,
+                    else => return error.Runtime,
                 }
             },
 
@@ -507,7 +508,7 @@ fn pop(self: *Self) Value {
     };
 }
 
-fn binary(self: *Self, operator: fn (*Self, Value, Value) error{ OutOfMemory, Semantics }!void) !void {
+fn binary(self: *Self, operator: fn (*Self, Value, Value) error{ OutOfMemory, Runtime }!void) !void {
     const right = self.pop();
     defer self.free(right);
     const left = self.pop();
@@ -529,7 +530,7 @@ fn add(self: *Self, left: Value, right: Value) !void {
         .internal_string => |left_string| {
             const right_string = switch (right) {
                 .internal_string, .heap_string => right.string(),
-                else => return error.Semantics,
+                else => return error.Runtime,
             };
 
             const buffer = try self.allocator.alloc(u8, left_string.len + right_string.len);
@@ -555,7 +556,7 @@ fn add(self: *Self, left: Value, right: Value) !void {
 
             const right_string = switch (right) {
                 .internal_string, .heap_string => right.string(),
-                else => return error.Semantics,
+                else => return error.Runtime,
             };
 
             const left_len = buffer.len;
@@ -573,7 +574,7 @@ fn add(self: *Self, left: Value, right: Value) !void {
             left_object.tag = .string_prefix;
             left_object.data = .{ .string_prefix = .{ .object = object, .len = left_len } };
         },
-        else => return error.Semantics,
+        else => return error.Runtime,
     }
 }
 
@@ -633,19 +634,23 @@ fn isEqual(left: Value, right: Value) bool {
     };
 }
 
-fn testEvaluate(source: []const u8, expected: []const u8) !void {
-    const testing = std.testing;
-    const allocator = testing.allocator;
+fn testBuildBytecode(source: []const u8, root_symbol: Ast.RootSymbol) !Bytecode {
+    const allocator = std.testing.allocator;
     const parsing = @import("parsing.zig");
     const gen = @import("gen.zig");
 
-    const bytecode = blk: {
-        const ast = try parsing.parse(allocator, source, .expression);
-        defer ast.deinit(allocator);
-        errdefer ast.deinitStrings(allocator);
+    const ast = try parsing.parse(allocator, source, root_symbol);
+    defer ast.deinit(allocator);
+    errdefer ast.deinitStrings(allocator);
 
-        break :blk try gen.generate(allocator, ast.root().?, .expression);
-    };
+    return gen.generate(allocator, ast.root().?, root_symbol);
+}
+
+fn testEvaluate(source: []const u8, expected: []const u8) !void {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const bytecode = try testBuildBytecode(source, .expression);
     defer bytecode.deinit(allocator);
 
     var buffer: [1024]u8 = undefined;
@@ -696,44 +701,52 @@ test "evaluate binary expressions" {
     try testEvaluate("nil != false", "true");
 }
 
-fn testSemanticsError(source: []const u8) !void {
+fn testRuntimeError(source: []const u8) !void {
     const result = testEvaluate(source, "");
-    try std.testing.expectError(error.Semantics, result);
+    try std.testing.expectError(error.Runtime, result);
 }
 
-test "semantics errors" {
-    try testSemanticsError("-\"foo\"");
-    try testSemanticsError("-(\"hello\" + \" world!\")");
-    try testSemanticsError("\"foo\" * 42");
-    try testSemanticsError("true / 2");
-    try testSemanticsError("\"quz\" + 2");
-    try testSemanticsError("2 + a");
+test "runtime errors" {
+    try testRuntimeError("-\"foo\"");
+    try testRuntimeError("-(\"hello\" + \" world!\")");
+    try testRuntimeError("\"foo\" * 42");
+    try testRuntimeError("true / 2");
+    try testRuntimeError("\"quz\" + 2");
+    try testRuntimeError("2 + a");
 }
 
 fn testRun(source: []const u8, expected: []const u8) !void {
     const testing = std.testing;
     const allocator = testing.allocator;
-    const parsing = @import("parsing.zig");
-    const gen = @import("gen.zig");
-
-    const bytecode = blk: {
-        const ast = try parsing.parse(allocator, source, .program);
-        defer ast.deinit(allocator);
-        errdefer ast.deinitStrings(allocator);
-
-        break :blk try gen.generate(allocator, ast.root().?, .program);
-    };
-    defer bytecode.deinit(allocator);
 
     var write_state = std.Io.Writer.Allocating.init(allocator);
     defer write_state.deinit();
 
-    var runtime = Self.init(allocator, std.testing.io, &write_state.writer);
+    try testRunBinary(source, &write_state.writer);
+
+    try testing.expectEqualStrings(expected, write_state.writer.buffered());
+}
+
+fn testRunError(source: []const u8, comptime expected_error: anyerror) !void {
+    const testing = std.testing;
+
+    var black_hole_buffer: [4096]u8 = undefined;
+    var black_hole: std.Io.Writer.Discarding = .init(&black_hole_buffer);
+
+    try testing.expectError(expected_error, testRunBinary(source, &black_hole.writer));
+}
+
+fn testRunBinary(source: []const u8, writer: *std.Io.Writer) !void {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const bytecode = try testBuildBytecode(source, .program);
+    defer bytecode.deinit(allocator);
+
+    var runtime = Self.init(allocator, std.testing.io, writer);
     defer runtime.deinit();
 
     try runtime.run(bytecode.startOp().?);
-
-    try testing.expectEqualStrings(expected, write_state.writer.buffered());
 }
 
 test "run statements" {
@@ -808,6 +821,17 @@ test "run statements" {
         \\before
         \\
     );
+    try testRunError(
+        \\{
+        \\  var hello = "outer hello";
+        \\  {
+        \\    var hello = "inner hello";
+        \\    print hello;
+        \\  }
+        \\  print hello;
+        \\}
+        \\print hello;
+    , error.Runtime);
 }
 
 test "control flow" {
@@ -1024,5 +1048,49 @@ test "functions" {
     ,
         \\foo
         \\
+    );
+}
+
+test "declaration semantics" {
+    // Re-declaring a global is allowed (jlox dynamic globals).
+    try testRun(
+        \\var a = "value";
+        \\var a = a;
+        \\print a;
+    ,
+        \\value
+        \\
+    );
+    // A local variable may not reference itself in its own initializer.
+    try testRunError(
+        \\var a = "outer";
+        \\{ var a = a; }
+    ,
+        error.Semantics,
+    );
+    try testRunError(
+        \\fun returnArg(arg) { return arg; }
+        \\var b = "global";
+        \\{
+        \\    var a = "first";
+        \\    var b = returnArg(b);
+        \\    print b;
+        \\}
+        \\var b = b + " updated";
+    ,
+        error.Semantics,
+    );
+    try testRunError(
+        \\fun outer() {
+        \\    var a = "outer";
+        \\    fun inner() {
+        \\        var a = a;
+        \\        print a;
+        \\    }
+        \\    inner();
+        \\}
+        \\outer();
+    ,
+        error.Semantics,
     );
 }
