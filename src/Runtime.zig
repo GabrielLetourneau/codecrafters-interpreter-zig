@@ -13,6 +13,7 @@ pub const Value = union(enum) {
     number: f64,
     internal_string: []const u8,
     heap_string: *HeapObject,
+    class: usize,
     jump_target: usize,
     function: Function,
 
@@ -55,6 +56,10 @@ pub const ValueInContext = struct {
             .nil, .true, .false, .clock => try writer.writeAll(@tagName(value)),
             .number => |number| try writer.print("{d}", .{number}),
             .internal_string, .heap_string => try writer.writeAll(value.string()),
+            .class => |class_index| {
+                const name_index = self.bytecode.class_defs[class_index].name_index;
+                try writer.writeAll(self.bytecode.stringAtIndex(name_index));
+            },
             .jump_target => |target| try writer.print("<jmp {d}>", .{target}),
             .function => |function| {
                 const bytecode = self.bytecode;
@@ -78,6 +83,7 @@ pub const HeapObjectTag = enum {
     number,
     internal_string,
     heap_string,
+    class,
     string_buffer,
     string_prefix,
     function,
@@ -108,6 +114,7 @@ pub const HeapObject = struct {
             .number => .{ .number = self.data.number },
             .internal_string => .{ .internal_string = self.data.internal_string },
             .heap_string => .{ .heap_string = self.data.heap_string },
+            .class => .{ .class = self.data.class },
             .string_buffer, .string_prefix => unreachable,
             .function => .{ .function = self.data.function },
             .capture => unreachable,
@@ -140,6 +147,10 @@ pub const HeapObject = struct {
                 self.tag = .internal_string;
                 self.data = .{ .internal_string = internal_string };
             },
+            .class => |class_index| {
+                self.tag = .class;
+                self.data = .{ .class = class_index };
+            },
             .heap_string => |object| {
                 self.tag = .heap_string;
                 self.data = .{ .heap_string = object };
@@ -161,6 +172,7 @@ pub const HeapData = union {
     number: f64,
     internal_string: []const u8,
     heap_string: *HeapObject,
+    class: usize,
     string_buffer: []u8,
     string_prefix: struct { object: *HeapObject, len: usize },
     function: Function,
@@ -185,6 +197,7 @@ const StackData = union {
     string_ptr: [*]const u8,
     string_len: usize,
     object: *HeapObject,
+    class_index: usize,
     op_index: usize,
     function_index: usize,
     capture: ?*HeapObject,
@@ -249,6 +262,7 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                     .capture = null,
                 } });
             },
+            .def_class => try self.push(.{ .class = inst.classIndex() }),
 
             .not => {
                 const value = self.pop();
@@ -477,6 +491,9 @@ fn push(self: *Self, value: Value) !void {
             try self.data_stack.append(self.allocator, .{ .object = object });
             object.*.ref_count += 1;
         },
+        .class => |class_index| {
+            try self.data_stack.append(self.allocator, .{ .class_index = class_index });
+        },
         .jump_target => |target| try self.data_stack.append(self.allocator, .{ .op_index = target }),
         .function => |function| {
             try self.data_stack.append(self.allocator, .{ .function_index = function.function_index });
@@ -499,6 +516,7 @@ fn pop(self: *Self) Value {
             break :blk .{ .internal_string = ptr[0..len] };
         },
         .heap_string => .{ .heap_string = self.data_stack.pop().?.object },
+        .class => .{ .class = self.data_stack.pop().?.class_index },
         .jump_target => .{ .jump_target = self.data_stack.pop().?.op_index },
         .function => blk: {
             const capture = self.data_stack.pop().?.capture;
@@ -624,6 +642,10 @@ fn isEqual(left: Value, right: Value) bool {
         },
         .internal_string, .heap_string => switch (right) {
             .internal_string, .heap_string => std.mem.eql(u8, left.string(), right.string()),
+            else => false,
+        },
+        .class => |left_class_index| switch (right) {
+            .class => |right_class_index| left_class_index == right_class_index,
             else => false,
         },
         .jump_target => unreachable,
@@ -1147,5 +1169,30 @@ test "misplaced return statements" {
         \\}
     ,
         error.Semantics,
+    );
+}
+
+test "class declarations" {
+    try testRun(
+        \\class Robot {}
+        \\class Wizard {}
+        \\print Robot;
+        \\print Wizard;
+        \\print "Both classes successfully printed";
+    ,
+        \\Robot
+        \\Wizard
+        \\Both classes successfully printed
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\print Robot == Robot;
+        \\var c = Robot;
+        \\print c;
+    ,
+        \\true
+        \\Robot
+        \\
     );
 }

@@ -16,6 +16,7 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
     errdefer {
         generator.function_names_list.deinit(allocator);
         generator.function_defs_list.deinit(allocator);
+        generator.class_defs_list.deinit(allocator);
         generator.data_list.deinit(allocator);
         generator.ops_list.deinit(allocator);
     }
@@ -37,11 +38,15 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
     const function_names = try generator.function_names_list.toOwnedSlice(allocator);
     errdefer allocator.free(function_names);
 
+    const class_defs = try generator.class_defs_list.toOwnedSlice(allocator);
+    errdefer allocator.free(class_defs);
+
     return .{
         .ops = ops,
         .data = data,
         .function_defs = function_defs,
         .function_names = function_names,
+        .class_defs = class_defs,
         .string_starts = root.ast.string_starts,
         .strings = root.ast.strings,
     };
@@ -55,6 +60,7 @@ const Generator = struct {
 
     function_defs_list: std.ArrayListUnmanaged(Bytecode.FunctionDefinition) = .empty,
     function_names_list: std.ArrayListUnmanaged(usize) = .empty,
+    class_defs_list: std.ArrayListUnmanaged(Bytecode.ClassDefinition) = .empty,
 
     frame_variables: std.ArrayListUnmanaged(usize) = .empty,
     captures: std.ArrayListUnmanaged(usize) = .empty,
@@ -185,6 +191,27 @@ const Generator = struct {
                 }
                 self.data_list.items[final_return_index].index = capture_count;
                 self.returns.shrinkRetainingCapacity(new_function_base.return_base);
+
+                try self.addIndexed(.assign, maybe_variable orelse 1);
+                try self.addEmpty(.discard);
+            },
+
+            .class_decl => {
+                const class_def_node = node.onlyChild();
+                if (class_def_node.rightChild().tag() != .empty) return error.Semantics;
+
+                const maybe_variable = try self.getOrPutVariable(node.identifier());
+
+                const class_index = self.class_defs_list.items.len;
+                try self.class_defs_list.append(self.allocator, .{ .name_index = node.identifier() });
+
+                try self.addIndexed(.def_class, class_index);
+                if (maybe_variable) |variable| {
+                    try self.addIndexed(.assign, variable);
+                } else {
+                    try self.addEmpty(.alloc);
+                    try self.addIndexed(.variable, 1);
+                }
 
                 try self.addIndexed(.assign, maybe_variable orelse 1);
                 try self.addEmpty(.discard);

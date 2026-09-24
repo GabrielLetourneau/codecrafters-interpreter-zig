@@ -17,6 +17,7 @@ pub const OpCode = enum(u8) {
     variable,
     clock,
     def_fun,
+    def_class,
 
     // Unary operation; pops one value, pushes one
     not,
@@ -60,18 +61,24 @@ pub const FunctionDefinition = struct {
     param_count: usize,
 };
 
+pub const ClassDefinition = struct {
+    name_index: usize,
+};
+
 ops: []const OpCode, // op codes, program starts at 0
 data: []const Data, // relevant data in same order as ops
 string_starts: []const usize, // pointer to start of string; end of string is following entry
 strings: []const u8, // internalized strings
 function_defs: []const FunctionDefinition, // function definitions
 function_names: []const usize, // indexes of function name string starts
+class_defs: []const ClassDefinition, // class definitions
 
 const Bytecode = @This();
 
 pub fn deinit(self: Bytecode, allocator: std.mem.Allocator) void {
     allocator.free(self.function_names);
     allocator.free(self.function_defs);
+    allocator.free(self.class_defs);
     allocator.free(self.strings);
     allocator.free(self.string_starts);
     allocator.free(self.data);
@@ -104,6 +111,10 @@ pub const Instruction = struct {
                     function_def.param_count,
                     function_def.op_index,
                 });
+            },
+            .def_class => {
+                const name_index = self.bytecode.class_defs[self.classIndex()].name_index;
+                try writer.print(" {s}", .{self.bytecode.stringAtIndex(name_index)});
             },
             else => {},
         }
@@ -174,6 +185,12 @@ pub const Instruction = struct {
 
     pub fn functionIndex(self: Self) usize {
         assert(self.op() == .def_fun);
+
+        return self.index();
+    }
+
+    pub fn classIndex(self: Self) usize {
+        assert(self.op() == .def_class);
 
         return self.index();
     }

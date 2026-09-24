@@ -75,11 +75,37 @@ const Parser = struct {
     }
 
     fn declaration(self: *Self) error{ OutOfMemory, Syntax }!void {
-        if (try self.funDeclaration() or
+        if (try self.classDeclaration() or
+            try self.funDeclaration() or
             try self.varDeclaration())
             return;
 
         try self.statement();
+    }
+
+    fn classDeclaration(self: *Self) !bool {
+        if (self.match(.@"class") == null)
+            return false;
+
+        const identifier = self.match(.identifier) orelse
+            return error.Syntax;
+        const identifier_index = try self.getStringStartIndex(identifier.lexeme);
+
+        if (self.match(.left_brace) == null)
+            return error.Syntax;
+
+        try self.addEmpty(.empty);
+
+        if (self.match(.right_brace) == null)
+            return error.Syntax;
+
+        const lhs_index = self.lastNodeIndex();
+
+        try self.addIndexed(.class_def, lhs_index);
+
+        try self.addIndexed(.class_decl, identifier_index);
+
+        return true;
     }
 
     fn funDeclaration(self: *Self) !bool {
@@ -502,4 +528,26 @@ test "parse binary expressions" {
 
 test "syntax error" {
     try std.testing.expectError(error.Syntax, testParse("(72 +)", ""));
+}
+
+fn testParseProgram(source: []const u8, parsed: []const u8) !void {
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    const ast = try parse(allocator, source, .program);
+    defer {
+        ast.deinitStrings(allocator);
+        ast.deinit(allocator);
+    }
+
+    if (ast.root()) |node| {
+        const actual = try std.fmt.allocPrint(allocator, "{f}", .{node});
+        defer allocator.free(actual);
+
+        try testing.expectEqualStrings(parsed, actual);
+    } else try testing.expect(false);
+}
+
+test "parse class declarations" {
+    try testParseProgram("class Robot {}", "\n(class_decl Robot (class_def  ))");
 }
