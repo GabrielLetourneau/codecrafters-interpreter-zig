@@ -1094,3 +1094,58 @@ test "declaration semantics" {
         error.Semantics,
     );
 }
+
+test "misplaced return statements" {
+    // A return statement inside a function is fine; at the top level it is not.
+    try testRunError(
+        \\fun foo() {
+        \\  if (true) {
+        \\    return "early return";
+        \\  }
+        \\
+        \\  for (var i = 0; i < 10; i = i + 1) {
+        \\    return "loop return";
+        \\  }
+        \\}
+        \\
+        \\if (true) {
+        \\  return "conditional return";
+        \\}
+    ,
+        error.Semantics,
+    );
+    try testRunError(
+        \\{
+        \\  return "not allowed in a block either";
+        \\}
+    ,
+        error.Semantics,
+    );
+    try testRunError(
+        \\fun allowed() {
+        \\  if (true) {
+        \\    return "this is fine";
+        \\  }
+        \\  return;
+        \\}
+        \\
+        \\
+        \\fun outer() {
+        \\  fun inner() {
+        \\    return "ok";
+        \\  }
+        \\
+        \\  return "also ok";
+        \\}
+        \\
+        \\if (true) {
+        \\  fun nested() {
+        \\    return;
+        \\  }
+        \\
+        \\  return "not ok";
+        \\}
+    ,
+        error.Semantics,
+    );
+}

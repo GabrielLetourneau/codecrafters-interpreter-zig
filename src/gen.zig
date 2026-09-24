@@ -64,6 +64,8 @@ const Generator = struct {
     block_depth: usize = 0, // 1 = global scope (program root); incremented on every block entry
     declared_identifier: ?usize = null, // variable whose initializer is being compiled
 
+    function_depth: usize = 0, // > 0 while compiling a function body; return is only allowed there
+
     function_base: struct {
         variable_base: usize,
         capture_base: usize,
@@ -92,6 +94,7 @@ const Generator = struct {
                 try self.addEmpty(.print);
             },
             .@"return" => {
+                if (self.function_depth == 0) return error.Semantics;
                 try self.expression(node.onlyChild());
                 const return_op_index = self.nextOpIndex();
                 const frame_height = self.frame_variables.items.len - self.function_base.variable_base;
@@ -145,6 +148,9 @@ const Generator = struct {
                     .param_count = 0,
                 });
                 try self.function_names_list.append(self.allocator, node.identifier());
+
+                self.function_depth += 1;
+                defer self.function_depth -= 1;
 
                 try self.block(node.onlyChild());
                 try self.addEmpty(.nil);
