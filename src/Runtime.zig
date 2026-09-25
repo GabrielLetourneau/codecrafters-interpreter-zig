@@ -13,9 +13,10 @@ pub const Value = union(enum) {
     number: f64,
     internal_string: []const u8,
     heap_string: *HeapObject,
-    class: usize,
     jump_target: usize,
     function: Function,
+    instance: *HeapObject,
+    class: usize,
 
     pub fn inContext(self: Value, bytecode: *const Bytecode) ValueInContext {
         return .{ .bytecode = bytecode, .value = self };
@@ -56,15 +57,20 @@ pub const ValueInContext = struct {
             .nil, .true, .false, .clock => try writer.writeAll(@tagName(value)),
             .number => |number| try writer.print("{d}", .{number}),
             .internal_string, .heap_string => try writer.writeAll(value.string()),
-            .class => |class_index| {
-                const name_index = self.bytecode.class_defs[class_index].name_index;
-                try writer.writeAll(self.bytecode.stringAtIndex(name_index));
-            },
             .jump_target => |target| try writer.print("<jmp {d}>", .{target}),
             .function => |function| {
                 const bytecode = self.bytecode;
                 const string_start_index = bytecode.function_names[function.function_index];
                 try writer.print("<fn {s}>", .{bytecode.stringAtIndex(string_start_index)});
+            },
+            .instance => |object| {
+                const class_index = object.data.instance_body.class;
+                const name_index = self.bytecode.class_defs[class_index].name_index;
+                try writer.print("{s} instance", .{self.bytecode.stringAtIndex(name_index)});
+            },
+            .class => |class_index| {
+                const name_index = self.bytecode.class_defs[class_index].name_index;
+                try writer.writeAll(self.bytecode.stringAtIndex(name_index));
             },
         }
     }
@@ -75,6 +81,10 @@ pub const Function = struct {
     capture: ?*HeapObject,
 };
 
+pub const Instance = struct {
+    class: usize,
+};
+
 pub const HeapObjectTag = enum {
     nil,
     true,
@@ -83,11 +93,13 @@ pub const HeapObjectTag = enum {
     number,
     internal_string,
     heap_string,
-    class,
     string_buffer,
     string_prefix,
     function,
     capture,
+    instance,
+    instance_body,
+    class,
 };
 
 pub const HeapObject = struct {
@@ -114,10 +126,12 @@ pub const HeapObject = struct {
             .number => .{ .number = self.data.number },
             .internal_string => .{ .internal_string = self.data.internal_string },
             .heap_string => .{ .heap_string = self.data.heap_string },
-            .class => .{ .class = self.data.class },
             .string_buffer, .string_prefix => unreachable,
             .function => .{ .function = self.data.function },
             .capture => unreachable,
+            .instance => .{ .instance = self.data.instance },
+            .instance_body => unreachable,
+            .class => .{ .class = self.data.class },
         };
     }
 
@@ -147,10 +161,6 @@ pub const HeapObject = struct {
                 self.tag = .internal_string;
                 self.data = .{ .internal_string = internal_string };
             },
-            .class => |class_index| {
-                self.tag = .class;
-                self.data = .{ .class = class_index };
-            },
             .heap_string => |object| {
                 self.tag = .heap_string;
                 self.data = .{ .heap_string = object };
@@ -163,6 +173,15 @@ pub const HeapObject = struct {
                 if (function.capture) |capture|
                     capture.ref_count += 1;
             },
+            .instance => |object| {
+                self.tag = .instance;
+                self.data = .{ .instance = object };
+                object.ref_count += 1;
+            },
+            .class => |class_index| {
+                self.tag = .class;
+                self.data = .{ .class = class_index };
+            },
         }
     }
 };
@@ -172,11 +191,13 @@ pub const HeapData = union {
     number: f64,
     internal_string: []const u8,
     heap_string: *HeapObject,
-    class: usize,
     string_buffer: []u8,
     string_prefix: struct { object: *HeapObject, len: usize },
     function: Function,
     capture: struct { variable: *HeapObject, next: ?*HeapObject },
+    instance: *HeapObject,
+    instance_body: Instance,
+    class: usize,
 };
 
 allocator: Allocator,
@@ -197,10 +218,11 @@ const StackData = union {
     string_ptr: [*]const u8,
     string_len: usize,
     object: *HeapObject,
-    class_index: usize,
     op_index: usize,
     function_index: usize,
     capture: ?*HeapObject,
+    instance: *HeapObject,
+    class_index: usize,
 };
 
 pub fn init(allocator: Allocator, io: std.Io, out: *Writer) Self {
@@ -284,15 +306,16 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                 const variable = self.variableAtIndex(inst.variable());
 
-                const maybe_existing_heap_string = switch (variable.tag) {
+                const maybe_existing_object = switch (variable.tag) {
                     .heap_string => variable.data.heap_string,
+                    .instance => variable.data.instance,
                     else => null,
                 };
 
                 variable.setValue(value);
 
-                if (maybe_existing_heap_string) |heap_string|
-                    self.decrementRef(heap_string);
+                if (maybe_existing_object) |existing_object|
+                    self.decrementRef(existing_object);
 
                 try self.push(value);
             },
@@ -389,6 +412,17 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                         inst = .{ .bytecode = inst.bytecode, .op_index = function_def.op_index };
                         continue :sw inst.op();
                     },
+                    .class => |class_index| {
+                        if (inst.size() != 0) return error.Runtime;
+
+                        const instance = try self.heap.create(self.allocator);
+                        errdefer self.heap.destroy(instance);
+                        instance.tag = .instance_body;
+                        instance.ref_count = 0;
+                        instance.data = .{ .instance_body = .{ .class = class_index } };
+
+                        try self.push(.{ .instance = instance });
+                    },
                     else => return error.Runtime,
                 }
             },
@@ -439,6 +473,9 @@ pub fn free(self: *Self, value: Value) void {
             if (function.capture) |capture|
                 self.decrementRef(capture);
         },
+        .instance => |object| {
+            self.decrementRef(object);
+        },
         else => {},
     }
 }
@@ -457,6 +494,8 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
                 self.decrementRef(capture),
             .capture => if (object_copy.data.capture.next) |capture|
                 self.decrementRef(capture),
+            .instance => self.decrementRef(object_copy.data.instance),
+            .instance_body => {},
             else => {},
         }
     }
@@ -491,14 +530,18 @@ fn push(self: *Self, value: Value) !void {
             try self.data_stack.append(self.allocator, .{ .object = object });
             object.*.ref_count += 1;
         },
-        .class => |class_index| {
-            try self.data_stack.append(self.allocator, .{ .class_index = class_index });
-        },
         .jump_target => |target| try self.data_stack.append(self.allocator, .{ .op_index = target }),
         .function => |function| {
             try self.data_stack.append(self.allocator, .{ .function_index = function.function_index });
             try self.data_stack.append(self.allocator, .{ .capture = function.capture });
             if (function.capture) |capture| capture.*.ref_count += 1;
+        },
+        .instance => |object| {
+            try self.data_stack.append(self.allocator, .{ .instance = object });
+            object.*.ref_count += 1;
+        },
+        .class => |class_index| {
+            try self.data_stack.append(self.allocator, .{ .class_index = class_index });
         },
     }
 }
@@ -516,13 +559,14 @@ fn pop(self: *Self) Value {
             break :blk .{ .internal_string = ptr[0..len] };
         },
         .heap_string => .{ .heap_string = self.data_stack.pop().?.object },
-        .class => .{ .class = self.data_stack.pop().?.class_index },
         .jump_target => .{ .jump_target = self.data_stack.pop().?.op_index },
         .function => blk: {
             const capture = self.data_stack.pop().?.capture;
             const function_index = self.data_stack.pop().?.function_index;
             break :blk .{ .function = .{ .function_index = function_index, .capture = capture } };
         },
+        .instance => .{ .instance = self.data_stack.pop().?.instance },
+        .class => .{ .class = self.data_stack.pop().?.class_index },
     };
 }
 
@@ -642,6 +686,10 @@ fn isEqual(left: Value, right: Value) bool {
         },
         .internal_string, .heap_string => switch (right) {
             .internal_string, .heap_string => std.mem.eql(u8, left.string(), right.string()),
+            else => false,
+        },
+        .instance => |left_instance| switch (right) {
+            .instance => |right_instance| left_instance == right_instance,
             else => false,
         },
         .class => |left_class_index| switch (right) {
@@ -1195,4 +1243,86 @@ test "class declarations" {
         \\Robot
         \\
     );
+}
+
+test "class instances" {
+    try testRun(
+        \\class Robot {}
+        \\var r1 = Robot();
+        \\var r2 = Robot();
+        \\print r1;
+        \\print r2;
+    ,
+        \\Robot instance
+        \\Robot instance
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\class Wizard {}
+        \\var r = Robot();
+        \\var w = Wizard();
+        \\print r;
+        \\print w;
+    ,
+        \\Robot instance
+        \\Wizard instance
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\var c = Robot;
+        \\var r = c();
+        \\print r;
+    ,
+        \\Robot instance
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\var a = Robot();
+        \\var b = a;
+        \\print a == b;
+    ,
+        \\true
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\print Robot() == Robot();
+    ,
+        \\false
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\var r = Robot();
+        \\r = Robot();
+        \\print r;
+    ,
+        \\Robot instance
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\if (Robot()) print "magic";
+        \\if (!Robot()) print "not magic";
+        \\if (nil) print "unreachable";
+    ,
+        \\magic
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\{
+        \\    var r = Robot();
+        \\    print r;
+        \\}
+        \\print "scope exited";
+    ,
+        \\Robot instance
+        \\scope exited
+        \\
+    );
+    try testRunError("class Robot {}\nRobot(1);", error.Runtime);
 }
