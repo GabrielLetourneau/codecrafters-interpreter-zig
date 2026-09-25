@@ -18,6 +18,8 @@ pub const OpCode = enum(u8) {
     clock,
     def_fun,
     def_class,
+    get,
+    set,
 
     // Unary operation; pops one value, pushes one
     not,
@@ -116,6 +118,7 @@ pub const Instruction = struct {
                 const name_index = self.bytecode.class_defs[self.classIndex()].name_index;
                 try writer.print(" {s}", .{self.bytecode.stringAtIndex(name_index)});
             },
+            .get, .set => try writer.print(" {s}", .{self.string()}),
             else => {},
         }
     }
@@ -142,6 +145,15 @@ pub const Instruction = struct {
         return self.index();
     }
 
+    pub fn nameIndex(self: Self) usize {
+        assert(switch (self.op()) {
+            .get, .set => true,
+            else => false,
+        });
+
+        return self.index();
+    }
+
     pub fn number(self: Self) f64 {
         assert(self.op() == .number);
 
@@ -150,7 +162,7 @@ pub const Instruction = struct {
 
     pub fn string(self: Self) []const u8 {
         const start_index = switch (self.op()) {
-            .string => self.index(),
+            .string, .get, .set => self.index(),
             .def_fun => self.bytecode.function_names[self.index()],
             else => unreachable,
         };

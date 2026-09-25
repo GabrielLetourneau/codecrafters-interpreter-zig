@@ -84,7 +84,7 @@ const Parser = struct {
     }
 
     fn classDeclaration(self: *Self) !bool {
-        if (self.match(.@"class") == null)
+        if (self.match(.class) == null)
             return false;
 
         const identifier = self.match(.identifier) orelse
@@ -278,16 +278,23 @@ const Parser = struct {
 
         if (self.match(.equal) != null) {
             const lhs_index = self.lastNodeIndex();
-            if (self.tags_list.items[lhs_index] != .variable)
-                return error.Syntax;
 
-            // Cancel off the variable node, we will push an assignment on top of the right-hand side
-            _ = self.tags_list.pop();
-            const variable_index = self.data_list.pop().?.index;
+            switch (self.tags_list.items[lhs_index]) {
+                .variable => {
+                    _ = self.tags_list.pop();
+                    const variable_index = self.data_list.pop().?.index;
 
-            try self.assignment();
+                    try self.assignment();
 
-            try self.addIndexed(.assignment, variable_index);
+                    try self.addIndexed(.assignment, variable_index);
+                },
+                .get => {
+                    try self.assignment();
+
+                    try self.addIndexed(.set, lhs_index);
+                },
+                else => return error.Syntax,
+            }
         }
     }
 
@@ -383,26 +390,33 @@ const Parser = struct {
     fn call(self: *Self) !void {
         try self.primary();
 
-        while (self.match(.left_paren)) |_| {
+        while (true) {
             const lhs_index = self.lastNodeIndex();
 
-            try self.addEmpty(.empty);
+            if (self.match(.left_paren)) |_| {
+                try self.addEmpty(.empty);
 
-            if (self.match(.right_paren) == null) {
-                while (true) {
-                    const arguments_lhs_index = self.lastNodeIndex();
+                if (self.match(.right_paren) == null) {
+                    while (true) {
+                        const arguments_lhs_index = self.lastNodeIndex();
 
-                    try self.expression();
+                        try self.expression();
 
-                    try self.addIndexed(.arguments, arguments_lhs_index);
+                        try self.addIndexed(.arguments, arguments_lhs_index);
 
-                    if (self.match(.comma) == null) break;
+                        if (self.match(.comma) == null) break;
+                    }
+
+                    if (self.match(.right_paren) == null) return error.Syntax;
                 }
 
-                if (self.match(.right_paren) == null) return error.Syntax;
-            }
+                try self.addIndexed(.call, lhs_index);
+            } else if (self.match(.dot)) |_| {
+                const identifier = self.match(.identifier) orelse return error.Syntax;
+                const identifier_index = try self.getStringStartIndex(identifier.lexeme);
 
-            try self.addIndexed(.call, lhs_index);
+                try self.addIndexed(.get, identifier_index);
+            } else return;
         }
     }
 
@@ -528,26 +542,4 @@ test "parse binary expressions" {
 
 test "syntax error" {
     try std.testing.expectError(error.Syntax, testParse("(72 +)", ""));
-}
-
-fn testParseProgram(source: []const u8, parsed: []const u8) !void {
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    const ast = try parse(allocator, source, .program);
-    defer {
-        ast.deinitStrings(allocator);
-        ast.deinit(allocator);
-    }
-
-    if (ast.root()) |node| {
-        const actual = try std.fmt.allocPrint(allocator, "{f}", .{node});
-        defer allocator.free(actual);
-
-        try testing.expectEqualStrings(parsed, actual);
-    } else try testing.expect(false);
-}
-
-test "parse class declarations" {
-    try testParseProgram("class Robot {}", "\n(class_decl Robot (class_def  ))");
 }

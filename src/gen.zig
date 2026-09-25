@@ -385,6 +385,16 @@ const Generator = struct {
                 try self.addIndexed(.call, arguments_count);
             },
 
+            .get => {
+                try self.expression(node.onlyChild());
+                try self.addIndexed(.get, node.identifier());
+            },
+            .set => {
+                try self.expression(node.rightChild());
+                try self.expression(node.leftChild().onlyChild());
+                try self.addIndexed(.set, node.leftChild().identifier());
+            },
+
             .multiply => try self.binary(node, .multiply),
             .divide => try self.binary(node, .divide),
             .add => try self.binary(node, .add),

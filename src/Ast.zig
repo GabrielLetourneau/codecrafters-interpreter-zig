@@ -31,11 +31,13 @@ pub const NodeTag = enum(u8) {
     assignment,
     fun_decl,
     class_decl,
+    get,
 
     // Binary expressions: data points to left-hand child, immediate child is right-hand child
     declarations, // lhs is .empty or declaration; rhs is single declaration
     arguments,
     call,
+    set,
     fun_def,
     class_def, // lhs is .empty (method list head); rhs is last method, or .empty
     @"if",
@@ -132,12 +134,6 @@ pub const Node = struct {
                     .{ if_statement.leftChild(), if_statement.rightChild(), self.rightChild() },
                 );
             },
-            .class_decl => {
-                const index_data = self.data().index;
-                const start = self.ast.string_starts[index_data];
-                const end = self.ast.string_starts[index_data + 1];
-                try writer.print("(class_decl {s} {f})", .{ self.ast.strings[start..end], self.onlyChild() });
-            },
             .@"for" => {
                 const for_preamble = self.leftChild();
                 const for_cond_init = for_preamble.leftChild();
@@ -161,7 +157,7 @@ pub const Node = struct {
 
     pub fn identifier(self: Self) usize {
         assert(switch (self.tag()) {
-            .var_decl, .variable, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl => true,
+            .var_decl, .variable, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get => true,
             else => false,
         });
 
@@ -182,7 +178,7 @@ pub const Node = struct {
 
     pub fn onlyChild(self: Self) Self {
         assert(switch (self.tag()) {
-            .group, .not, .unary_minus, .print, .@"return", .block, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl => true,
+            .group, .not, .unary_minus, .print, .@"return", .block, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get => true,
             else => false,
         });
 

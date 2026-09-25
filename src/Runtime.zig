@@ -81,8 +81,14 @@ pub const Function = struct {
     capture: ?*HeapObject,
 };
 
+pub const Field = struct {
+    name_index: usize,
+    value: Value,
+};
+
 pub const Instance = struct {
     class: usize,
+    fields: std.ArrayListUnmanaged(Field) = .empty,
 };
 
 pub const HeapObjectTag = enum {
@@ -426,6 +432,52 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                     else => return error.Runtime,
                 }
             },
+            .get => {
+                const object = self.pop();
+                defer self.free(object);
+
+                const instance = switch (object) {
+                    .instance => |instance| instance,
+                    else => return error.Runtime,
+                };
+
+                const name_index = inst.nameIndex();
+                for (instance.data.instance_body.fields.items) |field| {
+                    if (field.name_index == name_index) {
+                        try self.push(field.value);
+                        break;
+                    }
+                } else return error.Runtime;
+            },
+            .set => {
+                const object = self.pop();
+                defer self.free(object);
+
+                const instance = switch (object) {
+                    .instance => |instance| instance,
+                    else => return error.Runtime,
+                };
+
+                const value = self.pop();
+                defer self.free(value);
+
+                const name_index = inst.nameIndex();
+                const fields = &instance.data.instance_body.fields;
+
+                for (fields.items) |*field| {
+                    if (field.name_index == name_index) {
+                        self.free(field.value);
+                        field.value = value;
+                        retain(value);
+                        break;
+                    }
+                } else {
+                    retain(value);
+                    try fields.append(self.allocator, .{ .name_index = name_index, .value = value });
+                }
+
+                try self.push(value);
+            },
 
             .multiply => try self.binary(multiply),
             .divide => try self.binary(divide),
@@ -480,6 +532,17 @@ pub fn free(self: *Self, value: Value) void {
     }
 }
 
+fn retain(value: Value) void {
+    switch (value) {
+        .heap_string => |object| object.ref_count += 1,
+        .instance => |object| object.ref_count += 1,
+        .function => |function| if (function.capture) |capture| {
+            capture.ref_count += 1;
+        },
+        else => {},
+    }
+}
+
 fn decrementRef(self: *Self, object: *HeapObject) void {
     object.*.ref_count -= 1;
     if (object.ref_count == 0) {
@@ -495,7 +558,12 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
             .capture => if (object_copy.data.capture.next) |capture|
                 self.decrementRef(capture),
             .instance => self.decrementRef(object_copy.data.instance),
-            .instance_body => {},
+            .instance_body => {
+                var fields = object_copy.data.instance_body.fields;
+                for (fields.items) |field|
+                    self.free(field.value);
+                fields.deinit(self.allocator);
+            },
             else => {},
         }
     }
@@ -1325,4 +1393,61 @@ test "class instances" {
         \\
     );
     try testRunError("class Robot {}\nRobot(1);", error.Runtime);
+}
+
+test "property access" {
+    try testRun(
+        \\class Spaceship {}
+        \\var falcon = Spaceship();
+        \\
+        \\falcon.name = "Millennium Falcon";
+        \\falcon.speed = 75.5;
+        \\
+        \\print "Ship details:";
+        \\print falcon.name;
+        \\print falcon.speed;
+    ,
+        \\Ship details:
+        \\Millennium Falcon
+        \\75.5
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\var a = Robot();
+        \\a.speed = 10;
+        \\a.speed = a.speed + 20;
+        \\print a.speed;
+        \\var b = Robot();
+        \\b.speed = 20;
+        \\print a.speed == b.speed;
+    ,
+        \\30
+        \\false
+        \\
+    );
+    try testRun(
+        \\class Robot {}
+        \\var a = Robot();
+        \\var b = Robot();
+        \\a.copilot = b;
+        \\b.name = "R2";
+        \\print a.copilot.name;
+    ,
+        \\R2
+        \\
+    );
+    try testRunError(
+        \\class Robot {}
+        \\var a = Robot();
+        \\print a.unknown;
+    ,
+        error.Runtime,
+    );
+    try testRunError(
+        \\var x = 5;
+        \\x.foo = 1;
+    ,
+        error.Runtime,
+    );
 }
