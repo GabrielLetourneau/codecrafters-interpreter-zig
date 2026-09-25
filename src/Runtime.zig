@@ -14,20 +14,12 @@ pub const Value = union(enum) {
     internal_string: []const u8,
     heap_string: *HeapObject,
     jump_target: usize,
-    function: Function,
+    function: *HeapObject,
     instance: *HeapObject,
     class: *HeapObject,
 
     pub fn inContext(self: Value, bytecode: *const Bytecode) ValueInContext {
         return .{ .bytecode = bytecode, .value = self };
-    }
-
-    fn string(self: Value) []const u8 {
-        return switch (self) {
-            .internal_string => |internal_string| internal_string,
-            .heap_string => |object| object.string(),
-            else => unreachable,
-        };
     }
 
     fn truthy(self: Value) bool {
@@ -56,51 +48,47 @@ pub const ValueInContext = struct {
         switch (value) {
             .nil, .true, .false, .clock => try writer.writeAll(@tagName(value)),
             .number => |number| try writer.print("{d}", .{number}),
-            .internal_string, .heap_string => try writer.writeAll(value.string()),
+            .internal_string, .heap_string => try writeStringValue(value, writer),
             .jump_target => |target| try writer.print("<jmp {d}>", .{target}),
-            .function => |function| {
+            .function => |object| {
                 const bytecode = self.bytecode;
-                const string_start_index = bytecode.function_names[function.function_index];
+                const string_start_index = bytecode.function_names[object.data.function.function_index];
                 try writer.print("<fn {s}>", .{bytecode.stringAtIndex(string_start_index)});
             },
             .instance => |object| {
-                const name_index = object.data.instance_body.class.data.class_body.name_index;
+                const class_index = object.data.instance_body.class.data.class_body.class_index;
+                const name_index = self.bytecode.class_defs[class_index].name_index;
                 try writer.print("{s} instance", .{self.bytecode.stringAtIndex(name_index)});
             },
             .class => |object| {
-                const name_index = object.data.class_body.name_index;
+                const name_index = self.bytecode.class_defs[object.data.class_body.class_index].name_index;
                 try writer.writeAll(self.bytecode.stringAtIndex(name_index));
             },
         }
     }
 };
 
+fn writeStringValue(value: Value, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    switch (value) {
+        .internal_string => |string| try writer.writeAll(string),
+        .heap_string => |object| {
+            const size = object.data.string_header.size;
+            if (size == 0) return;
+            const tail_count: usize = if (size % 8 == 0) 8 else size % 8;
+            try writeChain(writer, object.data.string_header.last.?, tail_count);
+        },
+        else => unreachable,
+    }
+}
+
+fn writeChain(writer: *std.Io.Writer, part: *HeapObject, part_count: usize) std.Io.Writer.Error!void {
+    if (part.data.string_part.prev) |prev| try writeChain(writer, prev, 8);
+    try writer.writeAll(part.data.string_part.data[0..part_count]);
+}
+
 pub const Function = struct {
     function_index: usize,
     capture: ?*HeapObject,
-};
-
-pub const Field = struct {
-    name_index: usize,
-    value: Value,
-};
-
-pub const MethodClosure = struct {
-    function_index: usize,
-    capture: ?*HeapObject,
-};
-
-pub const ClassBody = struct {
-    name_index: usize,
-    methods_start: usize,
-    methods_count: usize,
-    closures: std.ArrayListUnmanaged(MethodClosure) = .empty,
-    self_holder: ?*HeapObject = null,
-};
-
-pub const Instance = struct {
-    class: *HeapObject,
-    fields: std.ArrayListUnmanaged(Field) = .empty,
 };
 
 pub const HeapObjectTag = enum {
@@ -109,33 +97,39 @@ pub const HeapObjectTag = enum {
     false,
     clock,
     number,
-    internal_string,
-    heap_string,
-    string_buffer,
-    string_prefix,
+    string_header,
+    string_part,
     function,
     capture,
-    instance,
-    instance_body,
+    variable,
+    member,
+    member_list,
     class_body,
-    class,
-    class_self,
+    instance_body,
 };
+
+const HeapVariable = union {
+    empty: void,
+    number: f64,
+    internal_string: []const u8,
+    object: *HeapObject,
+};
+
+fn objectValue(tag: ValueTag, object: *HeapObject) Value {
+    return switch (tag) {
+        .heap_string => .{ .heap_string = object },
+        .function => .{ .function = object },
+        .instance => .{ .instance = object },
+        .class => .{ .class = object },
+        else => unreachable,
+    };
+}
 
 pub const HeapObject = struct {
     tag: HeapObjectTag,
+    value_tag: ValueTag,
     ref_count: u32,
     data: HeapData,
-
-    fn string(self: HeapObject) []const u8 {
-        return switch (self.tag) {
-            .internal_string => self.data.internal_string,
-            .heap_string => self.data.heap_string.string(),
-            .string_buffer => self.data.string_buffer,
-            .string_prefix => self.data.string_prefix.object.data.string_buffer[0..self.data.string_prefix.len],
-            else => unreachable,
-        };
-    }
 
     fn value(self: *HeapObject) Value {
         return switch (self.tag) {
@@ -144,67 +138,35 @@ pub const HeapObject = struct {
             .false => .{ .false = {} },
             .clock => .{ .clock = {} },
             .number => .{ .number = self.data.number },
-            .internal_string => .{ .internal_string = self.data.internal_string },
-            .heap_string => .{ .heap_string = self.data.heap_string },
-            .string_buffer, .string_prefix => unreachable,
-            .function => .{ .function = self.data.function },
-            .capture => unreachable,
-            .instance => .{ .instance = self.data.instance },
-            .instance_body => unreachable,
+            .string_header => .{ .heap_string = self },
+            .string_part, .capture, .member, .member_list => unreachable,
+            .function => .{ .function = self },
             .class_body => .{ .class = self },
-            .class => .{ .class = self.data.class },
-            .class_self => .{ .class = self.data.class_self },
+            .instance_body => .{ .instance = self },
+            .variable => switch (self.value_tag) {
+                .nil => .{ .nil = {} },
+                .true => .{ .true = {} },
+                .false => .{ .false = {} },
+                .clock => .{ .clock = {} },
+                .number => .{ .number = self.data.variable.number },
+                .internal_string => .{ .internal_string = self.data.variable.internal_string },
+                .heap_string, .function, .instance, .class => objectValue(self.value_tag, self.data.variable.object),
+                .jump_target => unreachable,
+            },
         };
     }
 
-    fn setValue(self: *HeapObject, new_value: Value) void {
+    fn storeValue(self: *HeapObject, new_value: Value) void {
+        self.value_tag = std.meta.activeTag(new_value);
         switch (new_value) {
-            .nil => {
-                self.tag = .nil;
-                self.data = .{ .empty = {} };
-            },
-            .true => {
-                self.tag = .true;
-                self.data = .{ .empty = {} };
-            },
-            .false => {
-                self.tag = .false;
-                self.data = .{ .empty = {} };
-            },
-            .clock => {
-                self.tag = .clock;
-                self.data = .{ .empty = {} };
-            },
-            .number => |number| {
-                self.tag = .number;
-                self.data = .{ .number = number };
-            },
-            .internal_string => |internal_string| {
-                self.tag = .internal_string;
-                self.data = .{ .internal_string = internal_string };
-            },
-            .heap_string => |object| {
-                self.tag = .heap_string;
-                self.data = .{ .heap_string = object };
+            .nil, .true, .false, .clock => self.data = .{ .variable = .{ .empty = {} } },
+            .number => |number| self.data = .{ .variable = .{ .number = number } },
+            .internal_string => |string| self.data = .{ .variable = .{ .internal_string = string } },
+            .heap_string, .function, .instance, .class => |object| {
+                self.data = .{ .variable = .{ .object = object } };
                 object.ref_count += 1;
             },
             .jump_target => unreachable,
-            .function => |function| {
-                self.tag = .function;
-                self.data = .{ .function = function };
-                if (function.capture) |capture|
-                    capture.ref_count += 1;
-            },
-            .instance => |object| {
-                self.tag = .instance;
-                self.data = .{ .instance = object };
-                object.ref_count += 1;
-            },
-            .class => |class_object| {
-                self.tag = .class;
-                self.data = .{ .class = class_object };
-                class_object.ref_count += 1;
-            },
         }
     }
 };
@@ -213,16 +175,36 @@ pub const HeapData = union {
     empty: void,
     number: f64,
     internal_string: []const u8,
-    heap_string: *HeapObject,
-    string_buffer: []u8,
-    string_prefix: struct { object: *HeapObject, len: usize },
+    string_header: struct {
+        size: usize,
+        last: ?*HeapObject,
+    },
+    string_part: struct {
+        prev: ?*HeapObject,
+        data: [8]u8,
+    },
     function: Function,
-    capture: struct { variable: *HeapObject, next: ?*HeapObject },
-    instance: *HeapObject,
-    instance_body: Instance,
-    class_body: ClassBody,
-    class: *HeapObject,
-    class_self: *HeapObject,
+    capture: struct {
+        variable: *HeapObject,
+        next: ?*HeapObject,
+    },
+    variable: HeapVariable,
+    member: struct {
+        name_index: usize,
+        value: *HeapObject,
+    },
+    member_list: struct {
+        member: *HeapObject,
+        next: ?*HeapObject,
+    },
+    class_body: struct {
+        class_index: usize,
+        methods: ?*HeapObject,
+    },
+    instance_body: struct {
+        class: *HeapObject,
+        members: ?*HeapObject,
+    },
 };
 
 allocator: Allocator,
@@ -236,6 +218,11 @@ variables_stack: std.ArrayListUnmanaged(*HeapObject),
 tags_stack: std.ArrayListUnmanaged(ValueTag),
 data_stack: std.ArrayListUnmanaged(StackData),
 
+nil_singleton: HeapObject = .{ .tag = .nil, .value_tag = .nil, .ref_count = 1, .data = .{ .empty = {} } },
+true_singleton: HeapObject = .{ .tag = .true, .value_tag = .nil, .ref_count = 1, .data = .{ .empty = {} } },
+false_singleton: HeapObject = .{ .tag = .false, .value_tag = .nil, .ref_count = 1, .data = .{ .empty = {} } },
+clock_singleton: HeapObject = .{ .tag = .clock, .value_tag = .nil, .ref_count = 1, .data = .{ .empty = {} } },
+
 const Self = @This();
 
 const StackData = union {
@@ -244,10 +231,6 @@ const StackData = union {
     string_len: usize,
     object: *HeapObject,
     op_index: usize,
-    function_index: usize,
-    capture: ?*HeapObject,
-    instance: *HeapObject,
-    class_object: *HeapObject,
 };
 
 pub fn init(allocator: Allocator, io: std.Io, out: *Writer) Self {
@@ -304,62 +287,66 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
             },
             .clock => try self.push(.clock),
             .def_fun => {
-                try self.push(.{ .function = .{
-                    .function_index = inst.functionIndex(),
-                    .capture = null,
-                } });
+                const function = try self.heap.create(self.allocator);
+                errdefer self.heap.destroy(function);
+                function.* = .{
+                    .tag = .function,
+                    .value_tag = .nil,
+                    .ref_count = 0,
+                    .data = .{ .function = .{ .function_index = inst.functionIndex(), .capture = null } },
+                };
+                try self.push(.{ .function = function });
             },
             .def_class => {
-                const class_def = inst.bytecode.class_defs[inst.classIndex()];
-
                 const class_object = try self.heap.create(self.allocator);
                 errdefer self.heap.destroy(class_object);
-                class_object.tag = .class_body;
-                class_object.ref_count = 0;
-                class_object.data = .{ .class_body = .{
-                    .name_index = class_def.name_index,
-                    .methods_start = class_def.methods_start,
-                    .methods_count = class_def.methods_count,
-                } };
+                class_object.* = .{
+                    .tag = .class_body,
+                    .value_tag = .nil,
+                    .ref_count = 0,
+                    .data = .{ .class_body = .{ .class_index = inst.classIndex(), .methods = null } },
+                };
 
                 try self.push(.{ .class = class_object });
             },
             .store_method => {
                 const closure = self.pop();
-                defer self.free(closure);
+                errdefer self.free(closure);
+                const closure_object = closure.function;
 
                 if (self.tags_stack.items[self.tags_stack.items.len - 1] != .class)
                     return error.Runtime;
-                const class_object = self.data_stack.items[self.data_stack.items.len - 1].class_object;
+                const class_object = self.data_stack.items[self.data_stack.items.len - 1].object;
 
-                // Re-parent any capture that points at the class's own variable onto a
-                // class-owned non-counting holder, so a method referring back to its own
-                // class (e.g. `return Foo`) does not form an uncollectible ref-count cycle.
-                var maybe_node = closure.function.capture;
-                while (maybe_node) |capture_node| {
-                    const variable = capture_node.data.capture.variable;
-                    if (variable.tag == .class and variable.data.class == class_object) {
-                        variable.ref_count -= 1;
-                        capture_node.data.capture.variable = class_object.data.class_body.self_holder orelse blk: {
-                            const self_holder = try self.heap.create(self.allocator);
-                            errdefer self.heap.destroy(self_holder);
-                            self_holder.tag = .class_self;
-                            self_holder.ref_count = 1;
-                            self_holder.data = .{ .class_self = class_object };
-                            class_object.data.class_body.self_holder = self_holder;
-                            break :blk self_holder;
-                        };
-                    }
-                    maybe_node = capture_node.data.capture.next;
-                }
+                const class_def = inst.bytecode.class_defs[class_object.data.class_body.class_index];
+                const name_index = inst.bytecode.class_methods[class_def.methods_start + inst.methodSlot()].name_index;
 
-                if (closure.function.capture) |capture|
-                    capture.ref_count += 1;
+                const member = try self.heap.create(self.allocator);
+                errdefer self.heap.destroy(member);
+                member.* = .{
+                    .tag = .member,
+                    .value_tag = .nil,
+                    .ref_count = 0,
+                    .data = .{ .member = .{ .name_index = name_index, .value = closure_object } },
+                };
+                closure_object.ref_count += 1;
 
-                try class_object.data.class_body.closures.append(self.allocator, .{
-                    .function_index = closure.function.function_index,
-                    .capture = closure.function.capture,
-                });
+                const methods = &class_object.data.class_body.methods;
+                const link = try self.heap.create(self.allocator);
+                errdefer self.heap.destroy(link);
+                link.* = .{
+                    .tag = .member_list,
+                    .value_tag = .nil,
+                    .ref_count = 0,
+                    .data = .{ .member_list = .{ .member = member, .next = methods.* } },
+                };
+                member.ref_count += 1;
+                if (methods.*) |old_head|
+                    old_head.ref_count += 1;
+                methods.* = link;
+                link.ref_count += 1;
+
+                self.decrementRef(closure_object);
             },
 
             .not => {
@@ -378,14 +365,10 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
             },
             .assign => {
                 const value = self.pop();
-                defer self.free(value);
-
                 const variable = self.variableAtIndex(inst.variable());
 
-                const old_is_unmanaged = variable.tag == .class_self;
-                const old_value = variable.value();
-                variable.setValue(value);
-                if (!old_is_unmanaged) self.free(old_value);
+                self.releaseVariableValue(variable);
+                variable.storeValue(value);
 
                 try self.push(value);
             },
@@ -397,14 +380,17 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 captured_variable.ref_count += 1;
 
                 const capture = try self.heap.create(self.allocator);
-                capture.tag = .capture;
-                capture.ref_count = 1;
-                capture.data = .{ .capture = .{
-                    .variable = captured_variable,
-                    .next = value.function.capture,
-                } };
-
-                value.function.capture = capture;
+                errdefer self.heap.destroy(capture);
+                capture.* = .{
+                    .tag = .capture,
+                    .value_tag = .nil,
+                    .ref_count = 0,
+                    .data = .{ .capture = .{ .variable = captured_variable, .next = value.function.data.function.capture } },
+                };
+                if (value.function.data.function.capture) |old_head|
+                    old_head.ref_count += 1;
+                value.function.data.function.capture = capture;
+                capture.ref_count += 1;
 
                 try self.push(value);
             },
@@ -461,11 +447,11 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                         try self.push(.{ .number = time_in_seconds });
                     },
                     .function => |function| {
-                        const function_def = inst.bytecode.function_defs[function.function_index];
+                        const function_def = inst.bytecode.function_defs[function.data.function.function_index];
 
                         if (inst.size() != function_def.param_count) return error.Runtime;
 
-                        var maybe_capture = function.capture;
+                        var maybe_capture = function.data.function.capture;
                         while (maybe_capture) |capture| {
                             const capture_data = capture.data.capture;
                             const variable = capture_data.variable;
@@ -487,10 +473,13 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                         const instance = try self.heap.create(self.allocator);
                         errdefer self.heap.destroy(instance);
-                        instance.tag = .instance_body;
-                        instance.ref_count = 0;
+                        instance.* = .{
+                            .tag = .instance_body,
+                            .value_tag = .nil,
+                            .ref_count = 0,
+                            .data = .{ .instance_body = .{ .class = class_object, .members = null } },
+                        };
                         class_object.ref_count += 1;
-                        instance.data = .{ .instance_body = .{ .class = class_object } };
 
                         try self.push(.{ .instance = instance });
                     },
@@ -507,72 +496,27 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 };
 
                 const name_index = inst.nameIndex();
-                lookup: {
-                    for (instance.data.instance_body.fields.items) |field| {
-                        if (field.name_index == name_index) {
-                            try self.push(field.value);
-                            break :lookup;
-                        }
+                var member_node = instance.data.instance_body.members;
+                while (member_node) |link| {
+                    const member = link.data.member_list.member;
+                    if (member.data.member.name_index == name_index) {
+                        try self.push(member.data.member.value.value());
+                        break;
                     }
-
+                    member_node = link.data.member_list.next;
+                } else {
                     const class_object = instance.data.instance_body.class;
-                    const class_body = class_object.data.class_body;
-                    const methods = inst.bytecode.class_methods[class_body.methods_start..][0..class_body.methods_count];
-                    for (methods, 0..) |method, method_slot| {
-                        if (method.name_index != name_index) continue;
-
-                        const method_closure = class_body.closures.items[method_slot];
-
-                        const this_variable = try self.heap.create(self.allocator);
-                        errdefer self.heap.destroy(this_variable);
-                        this_variable.ref_count = 1;
-                        this_variable.setValue(object);
-
-                        const this_capture = try self.heap.create(self.allocator);
-                        errdefer self.heap.destroy(this_capture);
-                        this_capture.tag = .capture;
-                        this_capture.ref_count = 0;
-                        this_capture.data = .{ .capture = .{ .variable = this_variable, .next = null } };
-
-                        var stored_variables: std.ArrayListUnmanaged(*HeapObject) = .empty;
-                        defer stored_variables.deinit(self.allocator);
-                        var maybe_stored_capture = method_closure.capture;
-                        while (maybe_stored_capture) |stored_capture| {
-                            try stored_variables.append(self.allocator, stored_capture.data.capture.variable);
-                            maybe_stored_capture = stored_capture.data.capture.next;
+                    var method_node = class_object.data.class_body.methods;
+                    while (method_node) |link| {
+                        const member = link.data.member_list.member;
+                        if (member.data.member.name_index == name_index) {
+                            try self.bindMethod(instance, member.data.member.value);
+                            break;
                         }
-
-                        var new_capture: ?*HeapObject = this_capture;
-                        var stored_index = stored_variables.items.len;
-                        while (stored_index > 0) {
-                            stored_index -= 1;
-                            const stored_variable = stored_variables.items[stored_index];
-                            stored_variable.ref_count += 1;
-
-                            const copied_capture = try self.heap.create(self.allocator);
-                            errdefer self.heap.destroy(copied_capture);
-                            copied_capture.tag = .capture;
-                            copied_capture.ref_count = 0;
-                            copied_capture.data = .{ .capture = .{ .variable = stored_variable, .next = new_capture } };
-                            new_capture = copied_capture;
-                        }
-
-                        // Every capture node except the head counts its parent-pointer
-                        // link; the head counts only the pushed function-value hold.
-                        var chain_tail = new_capture.?.data.capture.next;
-                        while (chain_tail) |capture| {
-                            capture.ref_count = 1;
-                            chain_tail = capture.data.capture.next;
-                        }
-
-                        try self.push(.{ .function = .{
-                            .function_index = method_closure.function_index,
-                            .capture = new_capture,
-                        } });
-                        break :lookup;
+                        method_node = link.data.member_list.next;
+                    } else {
+                        return error.Runtime;
                     }
-
-                    return error.Runtime;
                 }
             },
             .set => {
@@ -588,21 +532,49 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 defer self.free(value);
 
                 const name_index = inst.nameIndex();
-                const fields = &instance.data.instance_body.fields;
+                const members = &instance.data.instance_body.members;
 
-                for (fields.items) |*field| {
-                    if (field.name_index == name_index) {
-                        self.free(field.value);
-                        field.value = value;
-                        retain(value);
+                var member_node = members.*;
+                while (member_node) |link| {
+                    const member = link.data.member_list.member;
+                    if (member.data.member.name_index == name_index) {
+                        const boxed = try self.box(value);
+                        self.decrementRef(member.data.member.value);
+                        member.data.member.value = boxed;
+                        boxed.ref_count += 1;
+                        try self.push(value);
                         break;
                     }
+                    member_node = link.data.member_list.next;
                 } else {
-                    retain(value);
-                    try fields.append(self.allocator, .{ .name_index = name_index, .value = value });
-                }
+                    const boxed = try self.box(value);
 
-                try self.push(value);
+                    const member = try self.heap.create(self.allocator);
+                    errdefer self.heap.destroy(member);
+                    member.* = .{
+                        .tag = .member,
+                        .value_tag = .nil,
+                        .ref_count = 0,
+                        .data = .{ .member = .{ .name_index = name_index, .value = boxed } },
+                    };
+                    boxed.ref_count += 1;
+
+                    const link = try self.heap.create(self.allocator);
+                    errdefer self.heap.destroy(link);
+                    link.* = .{
+                        .tag = .member_list,
+                        .value_tag = .nil,
+                        .ref_count = 0,
+                        .data = .{ .member_list = .{ .member = member, .next = members.* } },
+                    };
+                    member.ref_count += 1;
+                    if (members.*) |old_head|
+                        old_head.ref_count += 1;
+                    members.* = link;
+                    link.ref_count += 1;
+
+                    try self.push(value);
+                }
             },
 
             .multiply => try self.binary(multiply),
@@ -644,77 +616,61 @@ pub fn evaluate(self: *Self, start: Bytecode.Instruction) !Value {
 
 pub fn free(self: *Self, value: Value) void {
     switch (value) {
-        .heap_string => |object| {
+        .heap_string, .function, .instance, .class => |object| {
             self.decrementRef(object);
         },
-        .function => |function| {
-            if (function.capture) |capture|
-                self.decrementRef(capture);
-        },
-        .instance => |object| {
-            self.decrementRef(object);
-        },
-        .class => |object| {
-            self.decrementRef(object);
-        },
-        else => {},
-    }
-}
-
-fn retain(value: Value) void {
-    switch (value) {
-        .heap_string => |object| object.ref_count += 1,
-        .instance => |object| object.ref_count += 1,
-        .function => |function| if (function.capture) |capture| {
-            capture.ref_count += 1;
-        },
-        .class => |object| object.ref_count += 1,
         else => {},
     }
 }
 
 fn decrementRef(self: *Self, object: *HeapObject) void {
-    object.*.ref_count -= 1;
+    object.ref_count -= 1;
     if (object.ref_count == 0) {
         const object_copy = object.*;
         self.heap.destroy(object);
 
         switch (object_copy.tag) {
-            .heap_string => self.decrementRef(object_copy.data.heap_string),
-            .string_buffer => self.allocator.free(object_copy.data.string_buffer),
-            .string_prefix => self.decrementRef(object_copy.data.string_prefix.object),
+            .string_header => if (object_copy.data.string_header.last) |last|
+                self.decrementRef(last),
+            .string_part => if (object_copy.data.string_part.prev) |prev|
+                self.decrementRef(prev),
             .function => if (object_copy.data.function.capture) |capture|
                 self.decrementRef(capture),
             .capture => {
-                if (object_copy.data.capture.next) |capture|
-                    self.decrementRef(capture);
+                if (object_copy.data.capture.next) |next|
+                    self.decrementRef(next);
                 self.decrementRef(object_copy.data.capture.variable);
             },
-            .instance => self.decrementRef(object_copy.data.instance),
+            .member => self.decrementRef(object_copy.data.member.value),
+            .member_list => {
+                self.decrementRef(object_copy.data.member_list.member);
+                if (object_copy.data.member_list.next) |link|
+                    self.decrementRef(link);
+            },
+            .class_body => if (object_copy.data.class_body.methods) |methods|
+                self.decrementRef(methods),
             .instance_body => {
-                var fields = object_copy.data.instance_body.fields;
-                for (fields.items) |field|
-                    self.free(field.value);
-                fields.deinit(self.allocator);
                 self.decrementRef(object_copy.data.instance_body.class);
+                if (object_copy.data.instance_body.members) |members|
+                    self.decrementRef(members);
             },
-            .class_body => {
-                if (object_copy.data.class_body.self_holder) |self_holder| {
-                    if (self_holder.tag == .class_self)
-                        self.heap.destroy(self_holder)
-                    else
-                        self.decrementRef(self_holder);
-                }
-                var closures = object_copy.data.class_body.closures;
-                for (closures.items) |closure|
-                    if (closure.capture) |capture|
-                        self.decrementRef(capture);
-                closures.deinit(self.allocator);
-            },
-            .class => self.decrementRef(object_copy.data.class),
-            .class_self => {},
+            .variable => self.releaseVariableObject(object_copy),
             else => {},
         }
+    }
+}
+
+fn releaseVariableValue(self: *Self, variable: *HeapObject) void {
+    switch (variable.value_tag) {
+        .heap_string, .function, .instance, .class => self.decrementRef(variable.data.variable.object),
+        else => {},
+    }
+}
+
+fn releaseVariableObject(self: *Self, variable: HeapObject) void {
+    switch (variable.value_tag) {
+        .heap_string, .function, .instance, .class => self.decrementRef(variable.data.variable.object),
+        else => {},
     }
 }
 
@@ -724,8 +680,8 @@ fn allocVariable(self: *Self) !void {
 
     const variable = try self.heap.create(self.allocator);
     errdefer self.heap.destroy(variable);
-    variable.ref_count = 1;
-    variable.setValue(value);
+    variable.* = .{ .tag = .variable, .value_tag = .nil, .ref_count = 1, .data = .{ .variable = .{ .empty = {} } } };
+    variable.storeValue(value);
 
     try self.variables_stack.append(self.allocator, variable);
     self.free(value);
@@ -745,25 +701,14 @@ fn push(self: *Self, value: Value) !void {
             try self.data_stack.append(self.allocator, .{ .string_ptr = string.ptr });
             try self.data_stack.append(self.allocator, .{ .string_len = string.len });
         },
-        .heap_string => |object| {
-            try self.data_stack.append(self.allocator, .{ .object = object });
-            object.*.ref_count += 1;
-        },
+        .heap_string, .function, .instance, .class => |object| try self.pushObject(object),
         .jump_target => |target| try self.data_stack.append(self.allocator, .{ .op_index = target }),
-        .function => |function| {
-            try self.data_stack.append(self.allocator, .{ .function_index = function.function_index });
-            try self.data_stack.append(self.allocator, .{ .capture = function.capture });
-            if (function.capture) |capture| capture.*.ref_count += 1;
-        },
-        .instance => |object| {
-            try self.data_stack.append(self.allocator, .{ .instance = object });
-            object.*.ref_count += 1;
-        },
-        .class => |class_object| {
-            try self.data_stack.append(self.allocator, .{ .class_object = class_object });
-            class_object.*.ref_count += 1;
-        },
     }
+}
+
+fn pushObject(self: *Self, object: *HeapObject) !void {
+    try self.data_stack.append(self.allocator, .{ .object = object });
+    object.ref_count += 1;
 }
 
 fn pop(self: *Self) Value {
@@ -780,13 +725,9 @@ fn pop(self: *Self) Value {
         },
         .heap_string => .{ .heap_string = self.data_stack.pop().?.object },
         .jump_target => .{ .jump_target = self.data_stack.pop().?.op_index },
-        .function => blk: {
-            const capture = self.data_stack.pop().?.capture;
-            const function_index = self.data_stack.pop().?.function_index;
-            break :blk .{ .function = .{ .function_index = function_index, .capture = capture } };
-        },
-        .instance => .{ .instance = self.data_stack.pop().?.instance },
-        .class => .{ .class = self.data_stack.pop().?.class_object },
+        .function => .{ .function = self.data_stack.pop().?.object },
+        .instance => .{ .instance = self.data_stack.pop().?.object },
+        .class => .{ .class = self.data_stack.pop().?.object },
     };
 }
 
@@ -807,57 +748,146 @@ fn divide(self: *Self, left: Value, right: Value) !void {
 }
 
 fn add(self: *Self, left: Value, right: Value) !void {
-    sw: switch (left) {
+    switch (left) {
         .number => |number| try self.push(.{ .number = number + try right.checkedNumber() }),
-        .internal_string => |left_string| {
-            const right_string = switch (right) {
-                .internal_string, .heap_string => right.string(),
-                else => return error.Runtime,
-            };
-
-            const buffer = try self.allocator.alloc(u8, left_string.len + right_string.len);
-            errdefer self.allocator.free(buffer);
-
-            @memcpy(buffer[0..left_string.len], left_string);
-            @memcpy(buffer[left_string.len..], right_string);
-
-            const object = try self.heap.create(self.allocator);
-            errdefer self.heap.destroy(object);
-
-            object.tag = .string_buffer;
-            object.ref_count = 0;
-            object.data = .{ .string_buffer = buffer };
-            try self.push(.{ .heap_string = object });
-        },
-        .heap_string => |left_object| {
-            var buffer = switch (left_object.tag) {
-                .string_prefix => continue :sw .{ .internal_string = left_object.string() },
-                .string_buffer => left_object.data.string_buffer,
-                else => unreachable,
-            };
-
-            const right_string = switch (right) {
-                .internal_string, .heap_string => right.string(),
-                else => return error.Runtime,
-            };
-
-            const left_len = buffer.len;
-            buffer = try self.allocator.realloc(buffer, left_len + right_string.len);
-            @memcpy(buffer[left_len..], right_string);
-
-            const object = try self.heap.create(self.allocator);
-            errdefer self.heap.destroy(object);
-
-            object.tag = .string_buffer;
-            object.ref_count = 1;
-            object.data = .{ .string_buffer = buffer };
-            try self.push(.{ .heap_string = object });
-
-            left_object.tag = .string_prefix;
-            left_object.data = .{ .string_prefix = .{ .object = object, .len = left_len } };
-        },
+        .internal_string, .heap_string => try self.addString(left, right),
         else => return error.Runtime,
     }
+}
+
+fn addString(self: *Self, left: Value, right: Value) !void {
+    switch (right) {
+        .internal_string, .heap_string => {},
+        else => return error.Runtime,
+    }
+
+    const header = try self.heap.create(self.allocator);
+    errdefer self.heap.destroy(header);
+    header.* = .{
+        .tag = .string_header,
+        .value_tag = .nil,
+        .ref_count = 0,
+        .data = .{ .string_header = .{ .size = 0, .last = null } },
+    };
+    errdefer if (header.data.string_header.last) |last|
+        self.decrementRef(last);
+
+    switch (left) {
+        .internal_string => |string| try self.appendBytes(header, string),
+        .heap_string => |object| {
+            // Share the left chain so appending stays amortized O(1).
+            const left_last = object.data.string_header.last;
+            if (left_last) |last|
+                last.ref_count += 1;
+            header.data.string_header.last = left_last;
+            header.data.string_header.size = object.data.string_header.size;
+        },
+        else => unreachable,
+    }
+    switch (right) {
+        .internal_string => |string| try self.appendBytes(header, string),
+        .heap_string => |object| try self.appendChain(header, object),
+        else => unreachable,
+    }
+
+    try self.push(.{ .heap_string = header });
+}
+
+fn appendChain(self: *Self, header: *HeapObject, object: *HeapObject) error{OutOfMemory}!void {
+    const size = object.data.string_header.size;
+    if (size == 0) return;
+    const tail = object.data.string_header.last.?;
+    const tail_count: usize = if (size % 8 == 0) 8 else size % 8;
+    try self.appendChainParts(header, tail, tail_count);
+}
+
+fn appendChainParts(self: *Self, header: *HeapObject, part: *HeapObject, count: usize) error{OutOfMemory}!void {
+    if (part.data.string_part.prev) |prev|
+        try self.appendChainParts(header, prev, 8);
+    try self.appendBytes(header, part.data.string_part.data[0..count]);
+}
+
+fn appendBytes(self: *Self, header: *HeapObject, bytes: []const u8) error{OutOfMemory}!void {
+    var size = header.data.string_header.size;
+    var chunk = bytes;
+    if (chunk.len == 0) return;
+
+    if (size != 0) {
+        const used = if (size % 8 == 0) 8 else size % 8;
+        if (used < 8) {
+            const tail = header.data.string_header.last.?;
+            if (tail.ref_count == 1) {
+                // Merge into the exclusively-held partial tail: safe because other
+                // readers are bounded by their own string header sizes.
+                const take = @min(8 - used, chunk.len);
+                @memcpy(tail.data.string_part.data[used..][0..take], chunk[0..take]);
+                size += take;
+                chunk = chunk[take..];
+                header.data.string_header.size = size;
+            } else {
+                // The partial tail is shared; absorb it into a fresh node rather
+                // than stranding a partial node mid-chain.
+                return self.absorbPartialTail(header, chunk);
+            }
+            if (chunk.len == 0) return;
+        }
+    }
+
+    var tail = header.data.string_header.last;
+    while (chunk.len != 0) {
+        const count = @min(8, chunk.len);
+        const part = try self.heap.create(self.allocator);
+        errdefer self.heap.destroy(part);
+        var data = [_]u8{0} ** 8;
+        @memcpy(data[0..count], chunk[0..count]);
+        part.* = .{
+            .tag = .string_part,
+            .value_tag = .nil,
+            .ref_count = 0,
+            .data = .{ .string_part = .{ .prev = tail, .data = data } },
+        };
+        if (tail) |old| {
+            old.ref_count += 1; // inbound prev edge from `part`
+            old.ref_count -= 1; // the header no longer points at `old`
+        }
+        part.ref_count += 1; // inbound header.last edge
+        header.data.string_header.last = part;
+        size += count;
+        header.data.string_header.size = size;
+        tail = part;
+        chunk = chunk[count..];
+    }
+}
+
+fn absorbPartialTail(self: *Self, header: *HeapObject, bytes: []const u8) error{OutOfMemory}!void {
+    const size = header.data.string_header.size;
+    const used = if (size % 8 == 0) 8 else size % 8;
+    const tail = header.data.string_header.last.?;
+
+    const old_prev = tail.data.string_part.prev;
+    const take = @min(8 - used, bytes.len);
+    var data = [_]u8{0} ** 8;
+    @memcpy(data[0..used], tail.data.string_part.data[0..used]);
+    @memcpy(data[used..][0..take], bytes[0..take]);
+
+    const part = try self.heap.create(self.allocator);
+    part.* = .{
+        .tag = .string_part,
+        .value_tag = .nil,
+        .ref_count = 1,
+        .data = .{ .string_part = .{ .prev = old_prev, .data = data } },
+    };
+
+    // The fresh part inherits the tail's left edge and the header's last edge.
+    if (old_prev) |prev|
+        prev.ref_count += 1;
+    tail.ref_count -= 1;
+
+    header.data.string_header.last = part;
+    header.data.string_header.size = size + take;
+
+    if (bytes[take..].len != 0)
+        try self.appendBytes(header, bytes[take..]);
 }
 
 fn substract(self: *Self, left: Value, right: Value) !void {
@@ -890,8 +920,8 @@ fn equal(self: *Self, left: Value, right: Value) !void {
 }
 
 fn not_equal(self: *Self, left: Value, right: Value) !void {
-    const result = !isEqual(left, right);
-    try self.push(if (result) .true else .false);
+    const result = isEqual(left, right);
+    try self.push(if (!result) .true else .false);
 }
 
 fn isEqual(left: Value, right: Value) bool {
@@ -904,8 +934,14 @@ fn isEqual(left: Value, right: Value) bool {
             .number => |right_number| left_number == right_number,
             else => false,
         },
-        .internal_string, .heap_string => switch (right) {
-            .internal_string, .heap_string => std.mem.eql(u8, left.string(), right.string()),
+        .internal_string => |left_internal| switch (right) {
+            .internal_string => |right_internal| std.mem.eql(u8, left_internal, right_internal),
+            .heap_string => |right_heap| heapInternalStringsEqual(right_heap, left_internal),
+            else => false,
+        },
+        .heap_string => |left_heap| switch (right) {
+            .internal_string => |right_internal| heapInternalStringsEqual(left_heap, right_internal),
+            .heap_string => |right_heap| heapStringsEqual(left_heap, right_heap),
             else => false,
         },
         .instance => |left_instance| switch (right) {
@@ -918,10 +954,109 @@ fn isEqual(left: Value, right: Value) bool {
         },
         .jump_target => unreachable,
         .function => |left_function| switch (right) {
-            .function => |right_function| left_function.function_index == right_function.function_index,
+            .function => |right_function| left_function.data.function.function_index == right_function.data.function.function_index,
             else => false,
         },
     };
+}
+
+fn heapStringsEqual(left: *HeapObject, right: *HeapObject) bool {
+    if (left == right)
+        return true;
+    const left_size = left.data.string_header.size;
+    if (left_size != right.data.string_header.size)
+        return false;
+
+    var left_part: ?*HeapObject = left.data.string_header.last;
+    var right_part: ?*HeapObject = right.data.string_header.last;
+    var count: usize = if (left_size % 8 == 0) 8 else left_size % 8;
+    while (left_part) |lp| {
+        const rp = right_part.?;
+        if (!std.mem.eql(u8, lp.data.string_part.data[0..count], rp.data.string_part.data[0..count]))
+            return false;
+        left_part = lp.data.string_part.prev;
+        right_part = rp.data.string_part.prev;
+        count = 8;
+    }
+    return true;
+}
+
+fn heapInternalStringsEqual(heap: *HeapObject, internal: []const u8) bool {
+    const heap_size = heap.data.string_header.size;
+    if (heap_size != internal.len)
+        return false;
+
+    var pos: usize = internal.len;
+    var part: ?*HeapObject = heap.data.string_header.last;
+    var count: usize = if (heap_size % 8 == 0) 8 else heap_size % 8;
+    while (part) |p| {
+        if (!std.mem.eql(u8, p.data.string_part.data[0..count], internal[pos - count .. pos]))
+            return false;
+        part = p.data.string_part.prev;
+        pos -= count;
+        count = 8;
+    }
+    return true;
+}
+
+fn box(self: *Self, value: Value) error{OutOfMemory}!*HeapObject {
+    return switch (value) {
+        .nil => &self.nil_singleton,
+        .true => &self.true_singleton,
+        .false => &self.false_singleton,
+        .clock => &self.clock_singleton,
+        .number => |number| blk: {
+            const object = try self.heap.create(self.allocator);
+            object.* = .{ .tag = .number, .value_tag = .nil, .ref_count = 0, .data = .{ .number = number } };
+            break :blk object;
+        },
+        .internal_string => |string| blk: {
+            const object = try self.heap.create(self.allocator);
+            errdefer self.heap.destroy(object);
+            object.* = .{ .tag = .string_header, .value_tag = .nil, .ref_count = 0, .data = .{ .string_header = .{ .size = 0, .last = null } } };
+            errdefer if (object.data.string_header.last) |last|
+                self.decrementRef(last);
+            try self.appendBytes(object, string);
+            break :blk object;
+        },
+        .heap_string, .function, .instance, .class => |object| object,
+        .jump_target => unreachable,
+    };
+}
+
+fn bindMethod(self: *Self, instance: *HeapObject, stored: *HeapObject) error{OutOfMemory}!void {
+    const function_index = stored.data.function.function_index;
+    const stored_chain = stored.data.function.capture;
+
+    const this_variable = try self.heap.create(self.allocator);
+    errdefer self.heap.destroy(this_variable);
+    this_variable.* = .{ .tag = .variable, .value_tag = .nil, .ref_count = 1, .data = .{ .variable = .{ .empty = {} } } };
+    this_variable.storeValue(.{ .instance = instance });
+
+    const this_capture = try self.heap.create(self.allocator);
+    errdefer self.heap.destroy(this_capture);
+    this_capture.* = .{ .tag = .capture, .value_tag = .nil, .ref_count = 0, .data = .{ .capture = .{ .variable = this_variable, .next = null } } };
+
+    var new_capture: ?*HeapObject = this_capture;
+    var maybe_stored = stored_chain;
+    while (maybe_stored) |capture_node| {
+        const variable = capture_node.data.capture.variable;
+        variable.ref_count += 1;
+
+        const copied = try self.heap.create(self.allocator);
+        errdefer self.heap.destroy(copied);
+        copied.* = .{ .tag = .capture, .value_tag = .nil, .ref_count = 0, .data = .{ .capture = .{ .variable = variable, .next = new_capture } } };
+        new_capture.?.ref_count += 1;
+        new_capture = copied;
+        maybe_stored = capture_node.data.capture.next;
+    }
+
+    const bound = try self.heap.create(self.allocator);
+    errdefer self.heap.destroy(bound);
+    bound.* = .{ .tag = .function, .value_tag = .nil, .ref_count = 0, .data = .{ .function = .{ .function_index = function_index, .capture = new_capture } } };
+    new_capture.?.ref_count += 1;
+
+    try self.push(.{ .function = bound });
 }
 
 fn testBuildBytecode(source: []const u8, root_symbol: Ast.RootSymbol) !Bytecode {
@@ -1767,5 +1902,36 @@ test "instance methods" {
         \\print this;
     ,
         error.Semantics,
+    );
+    try testRun(
+        \\class Animal {
+        \\  makeSound() {
+        \\    print this.sound;
+        \\  }
+        \\
+        \\  identify() {
+        \\    print this.species;
+        \\  }
+        \\}
+        \\
+        \\var dog = Animal();
+        \\dog.sound = "Woof";
+        \\dog.species = "Dog";
+        \\
+        \\var cat = Animal();
+        \\cat.sound = "Meow";
+        \\cat.species = "Cat";
+        \\
+        \\// The this keyword should be bound to the
+        \\// class instance that the method is called on
+        \\cat.makeSound = dog.makeSound;
+        \\dog.identify = cat.identify;
+        \\
+        \\cat.makeSound(); // expect: Woof
+        \\dog.identify(); // expect: Cat
+    ,
+        \\Woof
+        \\Cat
+        \\
     );
 }
