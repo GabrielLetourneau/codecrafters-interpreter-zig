@@ -16,7 +16,7 @@ pub const Value = union(enum) {
     jump_target: usize,
     function: Function,
     instance: *HeapObject,
-    class: usize,
+    class: *HeapObject,
 
     pub fn inContext(self: Value, bytecode: *const Bytecode) ValueInContext {
         return .{ .bytecode = bytecode, .value = self };
@@ -64,12 +64,11 @@ pub const ValueInContext = struct {
                 try writer.print("<fn {s}>", .{bytecode.stringAtIndex(string_start_index)});
             },
             .instance => |object| {
-                const class_index = object.data.instance_body.class;
-                const name_index = self.bytecode.class_defs[class_index].name_index;
+                const name_index = object.data.instance_body.class.data.class_body.name_index;
                 try writer.print("{s} instance", .{self.bytecode.stringAtIndex(name_index)});
             },
-            .class => |class_index| {
-                const name_index = self.bytecode.class_defs[class_index].name_index;
+            .class => |object| {
+                const name_index = object.data.class_body.name_index;
                 try writer.writeAll(self.bytecode.stringAtIndex(name_index));
             },
         }
@@ -86,8 +85,21 @@ pub const Field = struct {
     value: Value,
 };
 
+pub const MethodClosure = struct {
+    function_index: usize,
+    capture: ?*HeapObject,
+};
+
+pub const ClassBody = struct {
+    name_index: usize,
+    methods_start: usize,
+    methods_count: usize,
+    closures: std.ArrayListUnmanaged(MethodClosure) = .empty,
+    self_holder: ?*HeapObject = null,
+};
+
 pub const Instance = struct {
-    class: usize,
+    class: *HeapObject,
     fields: std.ArrayListUnmanaged(Field) = .empty,
 };
 
@@ -105,7 +117,9 @@ pub const HeapObjectTag = enum {
     capture,
     instance,
     instance_body,
+    class_body,
     class,
+    class_self,
 };
 
 pub const HeapObject = struct {
@@ -137,7 +151,9 @@ pub const HeapObject = struct {
             .capture => unreachable,
             .instance => .{ .instance = self.data.instance },
             .instance_body => unreachable,
+            .class_body => .{ .class = self },
             .class => .{ .class = self.data.class },
+            .class_self => .{ .class = self.data.class_self },
         };
     }
 
@@ -184,9 +200,10 @@ pub const HeapObject = struct {
                 self.data = .{ .instance = object };
                 object.ref_count += 1;
             },
-            .class => |class_index| {
+            .class => |class_object| {
                 self.tag = .class;
-                self.data = .{ .class = class_index };
+                self.data = .{ .class = class_object };
+                class_object.ref_count += 1;
             },
         }
     }
@@ -203,7 +220,9 @@ pub const HeapData = union {
     capture: struct { variable: *HeapObject, next: ?*HeapObject },
     instance: *HeapObject,
     instance_body: Instance,
-    class: usize,
+    class_body: ClassBody,
+    class: *HeapObject,
+    class_self: *HeapObject,
 };
 
 allocator: Allocator,
@@ -228,7 +247,7 @@ const StackData = union {
     function_index: usize,
     capture: ?*HeapObject,
     instance: *HeapObject,
-    class_index: usize,
+    class_object: *HeapObject,
 };
 
 pub fn init(allocator: Allocator, io: std.Io, out: *Writer) Self {
@@ -290,7 +309,58 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                     .capture = null,
                 } });
             },
-            .def_class => try self.push(.{ .class = inst.classIndex() }),
+            .def_class => {
+                const class_def = inst.bytecode.class_defs[inst.classIndex()];
+
+                const class_object = try self.heap.create(self.allocator);
+                errdefer self.heap.destroy(class_object);
+                class_object.tag = .class_body;
+                class_object.ref_count = 0;
+                class_object.data = .{ .class_body = .{
+                    .name_index = class_def.name_index,
+                    .methods_start = class_def.methods_start,
+                    .methods_count = class_def.methods_count,
+                } };
+
+                try self.push(.{ .class = class_object });
+            },
+            .store_method => {
+                const closure = self.pop();
+                defer self.free(closure);
+
+                if (self.tags_stack.items[self.tags_stack.items.len - 1] != .class)
+                    return error.Runtime;
+                const class_object = self.data_stack.items[self.data_stack.items.len - 1].class_object;
+
+                // Re-parent any capture that points at the class's own variable onto a
+                // class-owned non-counting holder, so a method referring back to its own
+                // class (e.g. `return Foo`) does not form an uncollectible ref-count cycle.
+                var maybe_node = closure.function.capture;
+                while (maybe_node) |capture_node| {
+                    const variable = capture_node.data.capture.variable;
+                    if (variable.tag == .class and variable.data.class == class_object) {
+                        variable.ref_count -= 1;
+                        capture_node.data.capture.variable = class_object.data.class_body.self_holder orelse blk: {
+                            const self_holder = try self.heap.create(self.allocator);
+                            errdefer self.heap.destroy(self_holder);
+                            self_holder.tag = .class_self;
+                            self_holder.ref_count = 1;
+                            self_holder.data = .{ .class_self = class_object };
+                            class_object.data.class_body.self_holder = self_holder;
+                            break :blk self_holder;
+                        };
+                    }
+                    maybe_node = capture_node.data.capture.next;
+                }
+
+                if (closure.function.capture) |capture|
+                    capture.ref_count += 1;
+
+                try class_object.data.class_body.closures.append(self.allocator, .{
+                    .function_index = closure.function.function_index,
+                    .capture = closure.function.capture,
+                });
+            },
 
             .not => {
                 const value = self.pop();
@@ -312,16 +382,10 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                 const variable = self.variableAtIndex(inst.variable());
 
-                const maybe_existing_object = switch (variable.tag) {
-                    .heap_string => variable.data.heap_string,
-                    .instance => variable.data.instance,
-                    else => null,
-                };
-
+                const old_is_unmanaged = variable.tag == .class_self;
+                const old_value = variable.value();
                 variable.setValue(value);
-
-                if (maybe_existing_object) |existing_object|
-                    self.decrementRef(existing_object);
+                if (!old_is_unmanaged) self.free(old_value);
 
                 try self.push(value);
             },
@@ -418,14 +482,15 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                         inst = .{ .bytecode = inst.bytecode, .op_index = function_def.op_index };
                         continue :sw inst.op();
                     },
-                    .class => |class_index| {
+                    .class => |class_object| {
                         if (inst.size() != 0) return error.Runtime;
 
                         const instance = try self.heap.create(self.allocator);
                         errdefer self.heap.destroy(instance);
                         instance.tag = .instance_body;
                         instance.ref_count = 0;
-                        instance.data = .{ .instance_body = .{ .class = class_index } };
+                        class_object.ref_count += 1;
+                        instance.data = .{ .instance_body = .{ .class = class_object } };
 
                         try self.push(.{ .instance = instance });
                     },
@@ -442,12 +507,73 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 };
 
                 const name_index = inst.nameIndex();
-                for (instance.data.instance_body.fields.items) |field| {
-                    if (field.name_index == name_index) {
-                        try self.push(field.value);
-                        break;
+                lookup: {
+                    for (instance.data.instance_body.fields.items) |field| {
+                        if (field.name_index == name_index) {
+                            try self.push(field.value);
+                            break :lookup;
+                        }
                     }
-                } else return error.Runtime;
+
+                    const class_object = instance.data.instance_body.class;
+                    const class_body = class_object.data.class_body;
+                    const methods = inst.bytecode.class_methods[class_body.methods_start..][0..class_body.methods_count];
+                    for (methods, 0..) |method, method_slot| {
+                        if (method.name_index != name_index) continue;
+
+                        const method_closure = class_body.closures.items[method_slot];
+
+                        const this_variable = try self.heap.create(self.allocator);
+                        errdefer self.heap.destroy(this_variable);
+                        this_variable.ref_count = 1;
+                        this_variable.setValue(object);
+
+                        const this_capture = try self.heap.create(self.allocator);
+                        errdefer self.heap.destroy(this_capture);
+                        this_capture.tag = .capture;
+                        this_capture.ref_count = 0;
+                        this_capture.data = .{ .capture = .{ .variable = this_variable, .next = null } };
+
+                        var stored_variables: std.ArrayListUnmanaged(*HeapObject) = .empty;
+                        defer stored_variables.deinit(self.allocator);
+                        var maybe_stored_capture = method_closure.capture;
+                        while (maybe_stored_capture) |stored_capture| {
+                            try stored_variables.append(self.allocator, stored_capture.data.capture.variable);
+                            maybe_stored_capture = stored_capture.data.capture.next;
+                        }
+
+                        var new_capture: ?*HeapObject = this_capture;
+                        var stored_index = stored_variables.items.len;
+                        while (stored_index > 0) {
+                            stored_index -= 1;
+                            const stored_variable = stored_variables.items[stored_index];
+                            stored_variable.ref_count += 1;
+
+                            const copied_capture = try self.heap.create(self.allocator);
+                            errdefer self.heap.destroy(copied_capture);
+                            copied_capture.tag = .capture;
+                            copied_capture.ref_count = 0;
+                            copied_capture.data = .{ .capture = .{ .variable = stored_variable, .next = new_capture } };
+                            new_capture = copied_capture;
+                        }
+
+                        // Every capture node except the head counts its parent-pointer
+                        // link; the head counts only the pushed function-value hold.
+                        var chain_tail = new_capture.?.data.capture.next;
+                        while (chain_tail) |capture| {
+                            capture.ref_count = 1;
+                            chain_tail = capture.data.capture.next;
+                        }
+
+                        try self.push(.{ .function = .{
+                            .function_index = method_closure.function_index,
+                            .capture = new_capture,
+                        } });
+                        break :lookup;
+                    }
+
+                    return error.Runtime;
+                }
             },
             .set => {
                 const object = self.pop();
@@ -528,6 +654,9 @@ pub fn free(self: *Self, value: Value) void {
         .instance => |object| {
             self.decrementRef(object);
         },
+        .class => |object| {
+            self.decrementRef(object);
+        },
         else => {},
     }
 }
@@ -539,6 +668,7 @@ fn retain(value: Value) void {
         .function => |function| if (function.capture) |capture| {
             capture.ref_count += 1;
         },
+        .class => |object| object.ref_count += 1,
         else => {},
     }
 }
@@ -555,15 +685,34 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
             .string_prefix => self.decrementRef(object_copy.data.string_prefix.object),
             .function => if (object_copy.data.function.capture) |capture|
                 self.decrementRef(capture),
-            .capture => if (object_copy.data.capture.next) |capture|
-                self.decrementRef(capture),
+            .capture => {
+                if (object_copy.data.capture.next) |capture|
+                    self.decrementRef(capture);
+                self.decrementRef(object_copy.data.capture.variable);
+            },
             .instance => self.decrementRef(object_copy.data.instance),
             .instance_body => {
                 var fields = object_copy.data.instance_body.fields;
                 for (fields.items) |field|
                     self.free(field.value);
                 fields.deinit(self.allocator);
+                self.decrementRef(object_copy.data.instance_body.class);
             },
+            .class_body => {
+                if (object_copy.data.class_body.self_holder) |self_holder| {
+                    if (self_holder.tag == .class_self)
+                        self.heap.destroy(self_holder)
+                    else
+                        self.decrementRef(self_holder);
+                }
+                var closures = object_copy.data.class_body.closures;
+                for (closures.items) |closure|
+                    if (closure.capture) |capture|
+                        self.decrementRef(capture);
+                closures.deinit(self.allocator);
+            },
+            .class => self.decrementRef(object_copy.data.class),
+            .class_self => {},
             else => {},
         }
     }
@@ -571,13 +720,15 @@ fn decrementRef(self: *Self, object: *HeapObject) void {
 
 fn allocVariable(self: *Self) !void {
     const value = self.pop();
-    defer self.free(value);
+    errdefer self.free(value);
 
     const variable = try self.heap.create(self.allocator);
     errdefer self.heap.destroy(variable);
     variable.ref_count = 1;
     variable.setValue(value);
+
     try self.variables_stack.append(self.allocator, variable);
+    self.free(value);
 }
 
 fn variableAtIndex(self: Self, variable_index: usize) *HeapObject {
@@ -608,8 +759,9 @@ fn push(self: *Self, value: Value) !void {
             try self.data_stack.append(self.allocator, .{ .instance = object });
             object.*.ref_count += 1;
         },
-        .class => |class_index| {
-            try self.data_stack.append(self.allocator, .{ .class_index = class_index });
+        .class => |class_object| {
+            try self.data_stack.append(self.allocator, .{ .class_object = class_object });
+            class_object.*.ref_count += 1;
         },
     }
 }
@@ -634,7 +786,7 @@ fn pop(self: *Self) Value {
             break :blk .{ .function = .{ .function_index = function_index, .capture = capture } };
         },
         .instance => .{ .instance = self.data_stack.pop().?.instance },
-        .class => .{ .class = self.data_stack.pop().?.class_index },
+        .class => .{ .class = self.data_stack.pop().?.class_object },
     };
 }
 
@@ -760,8 +912,8 @@ fn isEqual(left: Value, right: Value) bool {
             .instance => |right_instance| left_instance == right_instance,
             else => false,
         },
-        .class => |left_class_index| switch (right) {
-            .class => |right_class_index| left_class_index == right_class_index,
+        .class => |left_class_object| switch (right) {
+            .class => |right_class_object| left_class_object == right_class_object,
             else => false,
         },
         .jump_target => unreachable,
@@ -1449,5 +1601,171 @@ test "property access" {
         \\x.foo = 1;
     ,
         error.Runtime,
+    );
+}
+
+test "instance methods" {
+    try testRun(
+        \\class Robot {
+        \\  beep() {
+        \\    print "Beep boop!";
+        \\  }
+        \\}
+        \\
+        \\var r2d2 = Robot();
+        \\r2d2.beep();
+        \\
+        \\Robot().beep();
+    ,
+        \\Beep boop!
+        \\Beep boop!
+        \\
+    );
+    try testRun(
+        \\class Point {
+        \\  initialize(x, y) {
+        \\    this.x = x;
+        \\    this.y = y;
+        \\  }
+        \\  sum() {
+        \\    return this.x + this.y;
+        \\  }
+        \\}
+        \\var p = Point();
+        \\p.initialize(3, 4);
+        \\print p.sum();
+        \\var q = Point();
+        \\q.initialize(10, 20);
+        \\print q.sum();
+        \\print p.sum();
+    ,
+        \\7
+        \\30
+        \\7
+        \\
+    );
+    try testRun(
+        \\class Robot {
+        \\  beep() {
+        \\    print "Beep boop!";
+        \\  }
+        \\}
+        \\var r2d2 = Robot();
+        \\var beep = r2d2.beep;
+        \\beep();
+        \\var still = r2d2.beep;
+        \\print beep == still;
+    ,
+        \\Beep boop!
+        \\true
+        \\
+    );
+    try testRun(
+        \\class Calc {
+        \\  add(a, b) {
+        \\    return a + b;
+        \\  }
+        \\}
+        \\var c = Calc();
+        \\print c.add(2, 3);
+    ,
+        \\5
+        \\
+    );
+    try testRun(
+        \\class Foo {
+        \\  returnSelf() {
+        \\    return Foo;
+        \\  }
+        \\}
+        \\print Foo().returnSelf();
+    ,
+        \\Foo
+        \\
+    );
+    try testRun(
+        \\var owner = "droid";
+        \\class Robot {
+        \\  describe() {
+        \\    print owner;
+        \\  }
+        \\}
+        \\Robot().describe();
+        \\owner = "planet";
+        \\Robot().describe();
+    ,
+        \\droid
+        \\planet
+        \\
+    );
+    try testRun(
+        \\fun makeRobot() {
+        \\  var owner = "droid";
+        \\  class Robot {
+        \\    describe() {
+        \\      print owner;
+        \\    }
+        \\  }
+        \\  return Robot;
+        \\}
+        \\var r = makeRobot();
+        \\r().describe();
+    ,
+        \\droid
+        \\
+    );
+    try testRun(
+        \\var a = "alpha";
+        \\var b = "beta";
+        \\class Pair {
+        \\  first() {
+        \\    print a;
+        \\  }
+        \\  second() {
+        \\    print b;
+        \\  }
+        \\}
+        \\var p = Pair();
+        \\p.first();
+        \\p.second();
+    ,
+        \\alpha
+        \\beta
+        \\
+    );
+    try testRun(
+        \\var wrap = "[";
+        \\class Wrapper {
+        \\  wrapValue(v) {
+        \\    return wrap + v + "]";
+        \\  }
+        \\}
+        \\print Wrapper().wrapValue("hi");
+    ,
+        \\[hi]
+        \\
+    );
+    try testRunError(
+        \\class Robot {}
+        \\var r = Robot();
+        \\r.beep();
+    ,
+        error.Runtime,
+    );
+    try testRunError(
+        \\class Robot {
+        \\  beep() {
+        \\    print "Beep boop!";
+        \\  }
+        \\}
+        \\var r = Robot();
+        \\r.beep(1);
+    ,
+        error.Runtime,
+    );
+    try testRunError(
+        \\print this;
+    ,
+        error.Semantics,
     );
 }

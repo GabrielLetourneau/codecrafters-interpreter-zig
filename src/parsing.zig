@@ -76,7 +76,7 @@ const Parser = struct {
 
     fn declaration(self: *Self) error{ OutOfMemory, Syntax }!void {
         if (try self.classDeclaration() or
-            try self.funDeclaration() or
+            try self.functionDeclaration(.fun, .fun_decl) or
             try self.varDeclaration())
             return;
 
@@ -95,22 +95,28 @@ const Parser = struct {
             return error.Syntax;
 
         try self.addEmpty(.empty);
+        const head_index = self.lastNodeIndex();
 
-        if (self.match(.right_brace) == null)
-            return error.Syntax;
+        while (self.match(.right_brace) == null) {
+            const methods_lhs_index = self.lastNodeIndex();
 
-        const lhs_index = self.lastNodeIndex();
+            _ = try self.functionDeclaration(null, .method);
 
-        try self.addIndexed(.class_def, lhs_index);
+            try self.addIndexed(.declarations, methods_lhs_index);
+        }
+
+        try self.addIndexed(.class_def, head_index);
 
         try self.addIndexed(.class_decl, identifier_index);
 
         return true;
     }
 
-    fn funDeclaration(self: *Self) !bool {
-        if (self.match(.fun) == null)
-            return false;
+    fn functionDeclaration(self: *Self, keyword: ?Scanner.TokenTag, wrapper: Ast.NodeTag) !bool {
+        if (keyword) |kw| {
+            if (self.match(kw) == null)
+                return false;
+        }
 
         const identifier = self.match(.identifier) orelse
             return error.Syntax;
@@ -140,7 +146,7 @@ const Parser = struct {
 
         try self.addIndexed(.fun_def, lhs_index);
 
-        try self.addIndexed(.fun_decl, identifier_index);
+        try self.addIndexed(wrapper, identifier_index);
 
         return true;
     }
@@ -427,6 +433,8 @@ const Parser = struct {
             try self.addEmpty(.true);
         } else if (self.match(.false) != null) {
             try self.addEmpty(.false);
+        } else if (self.match(.this) != null) {
+            try self.addEmpty(.this);
         } else if (self.match(.number)) |token| {
             try self.addData(.number, .{ .number = token.literal.number });
         } else if (self.match(.string)) |token| {

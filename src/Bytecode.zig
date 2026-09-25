@@ -37,6 +37,7 @@ pub const OpCode = enum(u8) {
     print,
     branch_cond_not,
     call,
+    store_method,
 
     // Binary operation; pops two values, pushes one
     multiply = 0x30,
@@ -63,8 +64,15 @@ pub const FunctionDefinition = struct {
     param_count: usize,
 };
 
+pub const MethodDefinition = struct {
+    name_index: usize,
+    function_index: usize,
+};
+
 pub const ClassDefinition = struct {
     name_index: usize,
+    methods_start: usize,
+    methods_count: usize,
 };
 
 ops: []const OpCode, // op codes, program starts at 0
@@ -74,6 +82,7 @@ strings: []const u8, // internalized strings
 function_defs: []const FunctionDefinition, // function definitions
 function_names: []const usize, // indexes of function name string starts
 class_defs: []const ClassDefinition, // class definitions
+class_methods: []const MethodDefinition, // class methods, laid out per class_defs ranges
 
 const Bytecode = @This();
 
@@ -81,6 +90,7 @@ pub fn deinit(self: Bytecode, allocator: std.mem.Allocator) void {
     allocator.free(self.function_names);
     allocator.free(self.function_defs);
     allocator.free(self.class_defs);
+    allocator.free(self.class_methods);
     allocator.free(self.strings);
     allocator.free(self.string_starts);
     allocator.free(self.data);
@@ -103,7 +113,7 @@ pub const Instruction = struct {
     pub fn format(self: Self, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("{d}: {s}", .{ self.op_index, @tagName(self.op()) });
         switch (self.op()) {
-            .free_frame, .branch_uncond, .variable, .assign, .capture, .@"or", .@"and", .branch_cond_not, .call, .@"return" => try writer.print(" {d}", .{self.index()}),
+            .free_frame, .branch_uncond, .variable, .assign, .capture, .@"or", .@"and", .branch_cond_not, .call, .@"return", .store_method => try writer.print(" {d}", .{self.index()}),
             .number => try writer.print(" {d}", .{self.number()}),
             .string => try writer.print(" {s}", .{self.string()}),
             .def_fun => {
@@ -203,6 +213,12 @@ pub const Instruction = struct {
 
     pub fn classIndex(self: Self) usize {
         assert(self.op() == .def_class);
+
+        return self.index();
+    }
+
+    pub fn methodSlot(self: Self) usize {
+        assert(self.op() == .store_method);
 
         return self.index();
     }

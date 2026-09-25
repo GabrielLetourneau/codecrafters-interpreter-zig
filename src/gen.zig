@@ -4,6 +4,20 @@ const Allocator = std.mem.Allocator;
 const Bytecode = @import("Bytecode.zig");
 const Ast = @import("Ast.zig");
 
+const K_THIS: usize = std.math.maxInt(usize);
+
+const FunctionBase = struct {
+    variable_base: usize,
+    capture_base: usize,
+    return_base: usize,
+};
+
+const FunctionCompilation = struct {
+    function_index: usize,
+    function_base: FunctionBase,
+    final_return_index: usize,
+};
+
 pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) !Bytecode {
     var generator: Generator = .{
         .allocator = allocator,
@@ -12,6 +26,7 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
         generator.returns.deinit(allocator);
         generator.captures.deinit(allocator);
         generator.frame_variables.deinit(allocator);
+        generator.method_list.deinit(allocator);
     }
     errdefer {
         generator.function_names_list.deinit(allocator);
@@ -41,12 +56,16 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
     const class_defs = try generator.class_defs_list.toOwnedSlice(allocator);
     errdefer allocator.free(class_defs);
 
+    const class_methods = try generator.method_list.toOwnedSlice(allocator);
+    errdefer allocator.free(class_methods);
+
     return .{
         .ops = ops,
         .data = data,
         .function_defs = function_defs,
         .function_names = function_names,
         .class_defs = class_defs,
+        .class_methods = class_methods,
         .string_starts = root.ast.string_starts,
         .strings = root.ast.strings,
     };
@@ -61,6 +80,7 @@ const Generator = struct {
     function_defs_list: std.ArrayListUnmanaged(Bytecode.FunctionDefinition) = .empty,
     function_names_list: std.ArrayListUnmanaged(usize) = .empty,
     class_defs_list: std.ArrayListUnmanaged(Bytecode.ClassDefinition) = .empty,
+    method_list: std.ArrayListUnmanaged(Bytecode.MethodDefinition) = .empty,
 
     frame_variables: std.ArrayListUnmanaged(usize) = .empty,
     captures: std.ArrayListUnmanaged(usize) = .empty,
@@ -71,12 +91,9 @@ const Generator = struct {
     declared_identifier: ?usize = null, // variable whose initializer is being compiled
 
     function_depth: usize = 0, // > 0 while compiling a function body; return is only allowed there
+    method_depth: usize = 0, // > 0 while compiling a class method body; this is only allowed there
 
-    function_base: struct {
-        variable_base: usize,
-        capture_base: usize,
-        return_base: usize,
-    } = .{
+    function_base: FunctionBase = .{
         .variable_base = 0,
         .capture_base = 0,
         .return_base = 0,
@@ -134,38 +151,11 @@ const Generator = struct {
             },
 
             .fun_decl => {
-                const jump_op_index = try self.addForwardBranch(.branch_uncond);
-
                 const maybe_variable = try self.getOrPutVariable(node.identifier());
 
-                const old_function_base = self.function_base;
-                self.function_base = .{
-                    .variable_base = self.frame_variables.items.len,
-                    .capture_base = self.captures.items.len,
-                    .return_base = self.returns.items.len,
-                };
-                const new_function_base = self.function_base;
+                const compiled = try self.compileBody(node.onlyChild(), node.identifier(), null);
 
-                const fun_start_index = self.nextOpIndex();
-
-                const function_index = self.function_defs_list.items.len;
-                try self.function_defs_list.append(self.allocator, .{
-                    .op_index = fun_start_index,
-                    .param_count = 0,
-                });
-                try self.function_names_list.append(self.allocator, node.identifier());
-
-                self.function_depth += 1;
-                defer self.function_depth -= 1;
-
-                try self.block(node.onlyChild());
-                try self.addEmpty(.nil);
-                const final_return_index = self.nextOpIndex();
-                try self.addIndexed(.@"return", 0);
-
-                self.setBranchTargetHere(jump_op_index);
-
-                try self.addIndexed(.def_fun, function_index);
+                try self.addIndexed(.def_fun, compiled.function_index);
                 if (maybe_variable) |variable| {
                     try self.addIndexed(.assign, variable);
                 } else {
@@ -173,24 +163,17 @@ const Generator = struct {
                     try self.addIndexed(.variable, 1);
                 }
 
-                self.function_base = old_function_base;
+                const capture_count = self.captures.items.len - compiled.function_base.capture_base;
 
-                const capture_count = self.captures.items.len - new_function_base.capture_base;
-
-                var capture_top = new_function_base.capture_base;
-                for (new_function_base.capture_base..self.captures.items.len) |capture_index| {
+                var capture_top = compiled.function_base.capture_base;
+                for (compiled.function_base.capture_base..self.captures.items.len) |capture_index| {
                     const captured_variable = self.captures.items[capture_index];
                     const variable = try self.getOrCaptureVariable(captured_variable, &capture_top);
                     try self.addIndexed(.capture, variable);
                 }
                 self.captures.shrinkRetainingCapacity(capture_top);
 
-                for (new_function_base.return_base..self.returns.items.len) |return_index| {
-                    const return_op_index = self.returns.items[return_index];
-                    self.data_list.items[return_op_index].index += capture_count;
-                }
-                self.data_list.items[final_return_index].index = capture_count;
-                self.returns.shrinkRetainingCapacity(new_function_base.return_base);
+                self.sealFunction(compiled.function_base, compiled.final_return_index, capture_count);
 
                 try self.addIndexed(.assign, maybe_variable orelse 1);
                 try self.addEmpty(.discard);
@@ -198,12 +181,23 @@ const Generator = struct {
 
             .class_decl => {
                 const class_def_node = node.onlyChild();
-                if (class_def_node.rightChild().tag() != .empty) return error.Semantics;
 
                 const maybe_variable = try self.getOrPutVariable(node.identifier());
 
+                const methods_start = self.method_list.items.len;
+                var methods_count: usize = 0;
+                var class_defs = class_def_node.rightChild();
+                while (class_defs.tag() == .declarations) {
+                    methods_count += 1;
+                    class_defs = class_defs.leftChild();
+                }
+
                 const class_index = self.class_defs_list.items.len;
-                try self.class_defs_list.append(self.allocator, .{ .name_index = node.identifier() });
+                try self.class_defs_list.append(self.allocator, .{
+                    .name_index = node.identifier(),
+                    .methods_start = methods_start,
+                    .methods_count = methods_count,
+                });
 
                 try self.addIndexed(.def_class, class_index);
                 if (maybe_variable) |variable| {
@@ -212,6 +206,25 @@ const Generator = struct {
                     try self.addEmpty(.alloc);
                     try self.addIndexed(.variable, 1);
                 }
+
+                var method_captures: std.ArrayListUnmanaged(usize) = .empty;
+                defer method_captures.deinit(self.allocator);
+                var capture_top = self.captures.items.len;
+                var stored_methods: usize = 0;
+                class_defs = class_def_node.rightChild();
+                while (class_defs.tag() == .declarations) {
+                    method_captures.clearRetainingCapacity();
+                    const function_index = try self.compileMethod(class_defs.rightChild(), &method_captures);
+                    try self.addIndexed(.def_fun, function_index);
+                    for (method_captures.items) |captured_variable| {
+                        const variable = try self.getOrCaptureVariable(captured_variable, &capture_top);
+                        try self.addIndexed(.capture, variable);
+                    }
+                    try self.addIndexed(.store_method, stored_methods);
+                    stored_methods += 1;
+                    class_defs = class_defs.leftChild();
+                }
+                self.captures.shrinkRetainingCapacity(capture_top);
 
                 try self.addIndexed(.assign, maybe_variable orelse 1);
                 try self.addEmpty(.discard);
@@ -325,6 +338,80 @@ const Generator = struct {
         self.block_base = old_frame_base;
     }
 
+    fn compileBody(self: *Self, fun_def: Ast.Node, name_index: usize, capture_seed: ?usize) error{ OutOfMemory, Semantics }!FunctionCompilation {
+        const jump_op_index = try self.addForwardBranch(.branch_uncond);
+
+        const old_function_base = self.function_base;
+        self.function_base = .{
+            .variable_base = self.frame_variables.items.len,
+            .capture_base = self.captures.items.len,
+            .return_base = self.returns.items.len,
+        };
+        const new_function_base = self.function_base;
+        if (capture_seed) |seed|
+            try self.captures.append(self.allocator, seed);
+
+        const function_index = self.function_defs_list.items.len;
+        const fun_start_index = self.nextOpIndex();
+        try self.function_defs_list.append(self.allocator, .{
+            .op_index = fun_start_index,
+            .param_count = 0,
+        });
+        try self.function_names_list.append(self.allocator, name_index);
+
+        self.function_depth += 1;
+        defer self.function_depth -= 1;
+
+        try self.block(fun_def);
+
+        try self.addEmpty(.nil);
+        const final_return_index = self.nextOpIndex();
+        try self.addIndexed(.@"return", 0);
+
+        self.setBranchTargetHere(jump_op_index);
+
+        self.function_base = old_function_base;
+
+        return .{
+            .function_index = function_index,
+            .function_base = new_function_base,
+            .final_return_index = final_return_index,
+        };
+    }
+
+    fn sealFunction(self: *Self, function_base: FunctionBase, final_return_index: usize, capture_count: usize) void {
+        for (function_base.return_base..self.returns.items.len) |return_index| {
+            const return_op_index = self.returns.items[return_index];
+            self.data_list.items[return_op_index].index += capture_count;
+        }
+        self.data_list.items[final_return_index].index = capture_count;
+        self.returns.shrinkRetainingCapacity(function_base.return_base);
+    }
+
+    fn compileMethod(self: *Self, node: Ast.Node, captures_out: *std.ArrayListUnmanaged(usize)) error{ OutOfMemory, Semantics }!usize {
+        self.method_depth += 1;
+        defer self.method_depth -= 1;
+
+        const compiled = try self.compileBody(node.onlyChild(), node.identifier(), K_THIS);
+
+        const capture_base = compiled.function_base.capture_base;
+        for (capture_base + 1..self.captures.items.len) |capture_index|
+            try captures_out.append(self.allocator, self.captures.items[capture_index]);
+
+        const capture_count = self.captures.items.len - capture_base;
+
+        self.sealFunction(compiled.function_base, compiled.final_return_index, capture_count);
+
+        self.captures.shrinkRetainingCapacity(capture_base);
+
+        try self.method_list.append(self.allocator, .{
+            .name_index = node.identifier(),
+            .function_index = compiled.function_index,
+        });
+
+        return compiled.function_index;
+    }
+
     fn expression(self: *Self, node: Ast.Node) error{ OutOfMemory, Semantics }!void {
         switch (node.tag()) {
             .nil => try self.addEmpty(.nil),
@@ -344,6 +431,12 @@ const Generator = struct {
 
             .number => try self.addData(.number, .{ .number = node.number() }),
             .string => try self.addIndexed(.string, node.stringIndex()),
+            .this => {
+                if (self.method_depth == 0) return error.Semantics;
+
+                const local_frame_height = self.frame_variables.items.len - self.function_base.variable_base;
+                try self.addIndexed(.variable, local_frame_height + 1);
+            },
             .variable => {
                 const identifier = node.identifier();
                 if (identifier != 0 and

@@ -25,6 +25,7 @@ pub const NodeTag = enum(u8) {
     var_decl,
     variable,
     parameter,
+    this,
 
     // Bindings: one child, identifier data
     var_decl_init,
@@ -32,6 +33,7 @@ pub const NodeTag = enum(u8) {
     fun_decl,
     class_decl,
     get,
+    method,
 
     // Binary expressions: data points to left-hand child, immediate child is right-hand child
     declarations, // lhs is .empty or declaration; rhs is single declaration
@@ -114,10 +116,12 @@ pub const Node = struct {
             .empty => {},
             .group, .not, .unary_minus, .print => try writer.print("({s} {f})", .{ self.tag().shortString(), self.onlyChild() }),
             .block => try writer.print("{{{f}\n}}", .{self.onlyChild()}),
+            .this => try writer.writeAll("this"),
             .number => try @import("number.zig").format(self.number(), writer),
             .string => try writer.writeAll(self.string()),
             .var_decl, .variable => try writer.print("({s} {d})", .{ self.tag().shortString(), self.identifier() }),
             .var_decl_init, .assignment => try writer.print("({s} {d} {f})", .{ self.tag().shortString(), self.identifier(), self.onlyChild() }),
+            .method => try writer.print("(method {d} {f})", .{ self.identifier(), self.onlyChild() }),
             .declarations => try writer.print("{f}\n{f}", .{ self.leftChild(), self.rightChild() }),
             .@"if", .@"while" => try writer.print(
                 "{s} ({f}) {f}",
@@ -157,7 +161,7 @@ pub const Node = struct {
 
     pub fn identifier(self: Self) usize {
         assert(switch (self.tag()) {
-            .var_decl, .variable, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get => true,
+            .var_decl, .variable, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get, .method => true,
             else => false,
         });
 
@@ -178,7 +182,7 @@ pub const Node = struct {
 
     pub fn onlyChild(self: Self) Self {
         assert(switch (self.tag()) {
-            .group, .not, .unary_minus, .print, .@"return", .block, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get => true,
+            .group, .not, .unary_minus, .print, .@"return", .block, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get, .method => true,
             else => false,
         });
 
