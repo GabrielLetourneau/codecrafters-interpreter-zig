@@ -62,6 +62,7 @@ pub const Data = union {
 pub const FunctionDefinition = struct {
     op_index: usize,
     param_count: usize,
+    is_initializer: bool, // true for methods named init; calling them yields the bound instance
 };
 
 pub const MethodDefinition = struct {

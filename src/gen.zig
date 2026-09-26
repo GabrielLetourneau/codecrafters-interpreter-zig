@@ -92,6 +92,7 @@ const Generator = struct {
 
     function_depth: usize = 0, // > 0 while compiling a function body; return is only allowed there
     method_depth: usize = 0, // > 0 while compiling a class method body; this is only allowed there
+    initializer: bool = false, // true while compiling the body of an init method
 
     function_base: FunctionBase = .{
         .variable_base = 0,
@@ -118,6 +119,7 @@ const Generator = struct {
             },
             .@"return" => {
                 if (self.function_depth == 0) return error.Semantics;
+                if (self.initializer and node.onlyChild().tag() != .nil) return error.Semantics;
                 try self.expression(node.onlyChild());
                 const return_op_index = self.nextOpIndex();
                 const frame_height = self.frame_variables.items.len - self.function_base.variable_base;
@@ -153,7 +155,7 @@ const Generator = struct {
             .fun_decl => {
                 const maybe_variable = try self.getOrPutVariable(node.identifier());
 
-                const compiled = try self.compileBody(node.onlyChild(), node.identifier(), null);
+                const compiled = try self.compileBody(node.onlyChild(), node.identifier(), null, false);
 
                 try self.addIndexed(.def_fun, compiled.function_index);
                 if (maybe_variable) |variable| {
@@ -338,7 +340,11 @@ const Generator = struct {
         self.block_base = old_frame_base;
     }
 
-    fn compileBody(self: *Self, fun_def: Ast.Node, name_index: usize, capture_seed: ?usize) error{ OutOfMemory, Semantics }!FunctionCompilation {
+    fn compileBody(self: *Self, fun_def: Ast.Node, name_index: usize, capture_seed: ?usize, is_initializer: bool) error{ OutOfMemory, Semantics }!FunctionCompilation {
+        const old_initializer = self.initializer;
+        self.initializer = is_initializer;
+        defer self.initializer = old_initializer;
+
         const jump_op_index = try self.addForwardBranch(.branch_uncond);
 
         const old_function_base = self.function_base;
@@ -356,6 +362,7 @@ const Generator = struct {
         try self.function_defs_list.append(self.allocator, .{
             .op_index = fun_start_index,
             .param_count = 0,
+            .is_initializer = is_initializer,
         });
         try self.function_names_list.append(self.allocator, name_index);
 
@@ -388,11 +395,18 @@ const Generator = struct {
         self.returns.shrinkRetainingCapacity(function_base.return_base);
     }
 
+    fn isInitMethod(node: Ast.Node) bool {
+        const name_index = node.identifier();
+        const start = node.ast.string_starts[name_index];
+        const end = node.ast.string_starts[name_index + 1];
+        return std.mem.eql(u8, node.ast.strings[start..end], "init");
+    }
+
     fn compileMethod(self: *Self, node: Ast.Node, captures_out: *std.ArrayListUnmanaged(usize)) error{ OutOfMemory, Semantics }!usize {
         self.method_depth += 1;
         defer self.method_depth -= 1;
 
-        const compiled = try self.compileBody(node.onlyChild(), node.identifier(), K_THIS);
+        const compiled = try self.compileBody(node.onlyChild(), node.identifier(), K_THIS, isInitMethod(node));
 
         const capture_base = compiled.function_base.capture_base;
         for (capture_base + 1..self.captures.items.len) |capture_index|

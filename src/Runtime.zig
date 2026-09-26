@@ -460,16 +460,44 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                             maybe_capture = capture_data.next;
                         }
 
+                        const constructor_instance: ?*HeapObject = if (function_def.is_initializer) blk: {
+                            const this_variable = self.variables_stack.items[self.variables_stack.items.len - 1];
+                            break :blk switch (this_variable.value()) {
+                                .instance => |instance| instance,
+                                else => null,
+                            };
+                        } else null;
+
                         for (0..function_def.param_count) |_|
                             try self.allocVariable();
 
                         try self.push(.{ .jump_target = inst.next().op_index });
+                        if (constructor_instance) |instance|
+                            try self.push(.{ .instance = instance });
 
                         inst = .{ .bytecode = inst.bytecode, .op_index = function_def.op_index };
                         continue :sw inst.op();
                     },
                     .class => |class_object| {
-                        if (inst.size() != 0) return error.Runtime;
+                        var init_function: ?*HeapObject = null;
+                        var init_index: ?usize = null;
+                        var methods_node = class_object.data.class_body.methods;
+                        while (methods_node) |link| {
+                            const member = link.data.member_list.member;
+                            const function_index = member.data.member.value.data.function.function_index;
+                            if (inst.bytecode.function_defs[function_index].is_initializer) {
+                                init_function = member.data.member.value;
+                                init_index = function_index;
+                                break;
+                            }
+                            methods_node = link.data.member_list.next;
+                        }
+
+                        const param_count: usize = if (init_index) |function_index|
+                            inst.bytecode.function_defs[function_index].param_count
+                        else
+                            0;
+                        if (inst.size() != param_count) return error.Runtime;
 
                         const instance = try self.heap.create(self.allocator);
                         errdefer self.heap.destroy(instance);
@@ -480,6 +508,29 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                             .data = .{ .instance_body = .{ .class = class_object, .members = null } },
                         };
                         class_object.ref_count += 1;
+
+                        if (init_index) |function_index| {
+                            try self.bindMethod(instance, init_function.?);
+                            const bound = self.pop();
+                            defer self.free(bound);
+
+                            var maybe_capture = bound.function.data.function.capture;
+                            while (maybe_capture) |capture| {
+                                const variable = capture.data.capture.variable;
+                                variable.ref_count += 1;
+                                try self.variables_stack.append(self.allocator, variable);
+                                maybe_capture = capture.data.capture.next;
+                            }
+
+                            for (0..param_count) |_|
+                                try self.allocVariable();
+
+                            try self.push(.{ .jump_target = inst.next().op_index });
+                            try self.push(.{ .instance = instance });
+
+                            inst = .{ .bytecode = inst.bytecode, .op_index = inst.bytecode.function_defs[function_index].op_index };
+                            continue :sw inst.op();
+                        }
 
                         try self.push(.{ .instance = instance });
                     },
@@ -592,16 +643,28 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                 const return_value = self.pop();
                 defer self.free(return_value);
 
-                const return_target = self.pop();
+                const top = self.pop();
 
                 for (0..inst.size()) |_| {
                     const variable = self.variables_stack.pop().?;
                     self.decrementRef(variable);
                 }
 
-                try self.push(return_value);
+                var return_target: usize = undefined;
+                switch (top) {
+                    .instance => {
+                        return_target = self.pop().jump_target;
+                        try self.push(top);
+                        self.free(top);
+                    },
+                    .jump_target => {
+                        return_target = top.jump_target;
+                        try self.push(return_value);
+                    },
+                    else => unreachable,
+                }
 
-                inst = .{ .bytecode = inst.bytecode, .op_index = return_target.jump_target };
+                inst = .{ .bytecode = inst.bytecode, .op_index = return_target };
                 continue :sw inst.op();
             },
         }
@@ -1680,6 +1743,140 @@ test "class instances" {
         \\
     );
     try testRunError("class Robot {}\nRobot(1);", error.Runtime);
+}
+
+test "constructors" {
+    try testRun(
+        \\class Default { init() { this.x = "bar"; this.y = 91; } }
+        \\print Default().x;
+        \\print Default().y;
+    ,
+        \\bar
+        \\91
+        \\
+    );
+    try testRun(
+        \\class Pair { init(a, b) { this.a = a; this.b = b; } }
+        \\var p = Pair(1, 2);
+        \\print p.a;
+        \\print p.b;
+        \\print Pair(3, 4).a + Pair(5, 6).b;
+    ,
+        \\1
+        \\2
+        \\9
+        \\
+    );
+    try testRun(
+        \\class Foo { init() { this.v = "ok"; return; } }
+        \\print Foo().v;
+    ,
+        \\ok
+        \\
+    );
+    try testRun(
+        \\class Foo { init() { return nil; } }
+        \\print Foo();
+    ,
+        \\Foo instance
+        \\
+    );
+    try testRun(
+        \\class Foo { init() { fun helper() { return 7; } this.v = helper(); } }
+        \\print Foo().v;
+    ,
+        \\7
+        \\
+    );
+    try testRun(
+        \\class Maker {
+        \\  init(name) {
+        \\    var prefix = "> ";
+        \\    fun greet() { return prefix + name; }
+        \\    this.greet = greet;
+        \\  }
+        \\}
+        \\print Maker("Bob").greet();
+    ,
+        \\> Bob
+        \\
+    );
+    try testRun(
+        \\class Counter {
+        \\  init(start) { this.count = start; }
+        \\  add(amount) { this.count = this.count + amount; }
+        \\}
+        \\var c = Counter(5);
+        \\c.add(3);
+        \\print c.count;
+    ,
+        \\8
+        \\
+    );
+    try testRun(
+        \\class Pair { init(a, b) { this.sum = a + b; } }
+        \\class Box { init(inner) { this.inner = inner; } }
+        \\var box = Box(Pair(1, 2));
+        \\print box.inner.sum;
+    ,
+        \\3
+        \\
+    );
+    try testRun(
+        \\class Foo { init(n) { if (n > 0) Foo(n - 1); this.n = n; } }
+        \\print Foo(3).n;
+    ,
+        \\3
+        \\
+    );
+    try testRun(
+        \\class Robot { init(id) { this.id = id; } }
+        \\var c = Robot;
+        \\var r = c(42);
+        \\print r.id;
+    ,
+        \\42
+        \\
+    );
+    try testRun(
+        \\class Counter {
+        \\  init(start) { if (start < 0) this.count = 0; else this.count = start; }
+        \\}
+        \\var instance = Counter(5);
+        \\print instance.init(28).count;
+        \\print instance.count;
+    ,
+        \\28
+        \\28
+        \\
+    );
+    try testRunError(
+        \\class Foo { init() { return 10; } }
+    ,
+        error.Semantics,
+    );
+    try testRunError(
+        \\class Foo { init() { if (true) return 5; } }
+    ,
+        error.Semantics,
+    );
+    try testRunError(
+        \\class Foo { init() { return this; } }
+    ,
+        error.Semantics,
+    );
+    try testRunError(
+        \\class Foo { init(a) {} }
+        \\Foo();
+    ,
+        error.Runtime,
+    );
+    try testRunError(
+        \\class Foo { init(a) {} }
+        \\Foo(1, 2);
+    ,
+        error.Runtime,
+    );
 }
 
 test "property access" {
