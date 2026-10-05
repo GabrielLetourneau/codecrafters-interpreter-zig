@@ -35,4 +35,11 @@ pub fn build(b: *std.Build) void {
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_exe_tests.step);
+
+    const fmt = b.addFmt(.{
+        .paths = &.{ "src", "build.zig" },
+        .check = true,
+    });
+    const fmt_step = b.step("fmt-check", "Check formatting");
+    fmt_step.dependOn(&fmt.step);
 }
