@@ -2502,3 +2502,131 @@ test "super" {
         \\class Missing < Baseer {}
     , error.Runtime);
 }
+
+test "this in nested functions" {
+    // The call happens while the enclosing method's frame is live.
+    try testRun(
+        \\class W {
+        \\  m() {
+        \\    var x = 1;
+        \\    fun inner() {
+        \\      print this;
+        \\    }
+        \\    inner();
+        \\  }
+        \\}
+        \\W().m();
+    ,
+        \\W instance
+        \\
+    );
+    // Returned closure called with unrelated topmost globals.
+    try testRun(
+        \\class W {
+        \\  get() {
+        \\    fun c() {
+        \\      print this.name;
+        \\    }
+        \\    return c;
+        \\  }
+        \\}
+        \\var w = W();
+        \\w.name = "Merlin";
+        \\var z = 99;
+        \\var f = w.get();
+        \\f();
+    ,
+        \\Merlin
+        \\
+    );
+    // Double nesting: function in function in method.
+    try testRun(
+        \\class W {
+        \\  m() {
+        \\    fun middle() {
+        \\      fun inner() {
+        \\        print this.label;
+        \\      }
+        \\      return inner;
+        \\    }
+        \\    return middle();
+        \\  }
+        \\}
+        \\var w = W();
+        \\w.label = "outer";
+        \\w.m()();
+    ,
+        \\outer
+        \\
+    );
+    // `this` captured after another variable keeps the ledger order.
+    try testRun(
+        \\class W {
+        \\  m() {
+        \\    var capture = "x";
+        \\    fun inner(guest) {
+        \\      print capture;
+        \\      print this.name + " " + guest;
+        \\    }
+        \\    inner("town");
+        \\  }
+        \\}
+        \\var w = W();
+        \\w.name = "worker";
+        \\w.m();
+    ,
+        \\x
+        \\worker town
+        \\
+    );
+    // super through a closure defined in a subclass method, and called
+    // after the method returned (CodeCrafters inheritance stage case).
+    try testRun(
+        \\class A {
+        \\  say() {
+        \\    print "A";
+        \\  }
+        \\}
+        \\class B < A {
+        \\  getClosure() {
+        \\    fun closure() {
+        \\      super.say();
+        \\    }
+        \\    return closure;
+        \\  }
+        \\  say() {
+        \\    print "B";
+        \\  }
+        \\}
+        \\class C < B {
+        \\  say() {
+        \\    print "C";
+        \\  }
+        \\}
+        \\C().getClosure()(); // expect: A
+    ,
+        \\A
+        \\
+    );
+    // super through a closure called while the method is live, resolving
+    // to the class that lexically defines the user, not the receiver's class.
+    try testRun(
+        \\class Base {
+        \\  method() {
+        \\    print "Base.method()";
+        \\  }
+        \\}
+        \\class Child < Base {
+        \\  method() {
+        \\    fun run() {
+        \\      super.method();
+        \\    }
+        \\    run();
+        \\  }
+        \\}
+        \\Child().method();
+    ,
+        \\Base.method()
+        \\
+    );
+}

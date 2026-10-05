@@ -99,6 +99,7 @@ const Generator = struct {
     function_depth: usize = 0, // > 0 while compiling a function body; return is only allowed there
     method_depth: usize = 0, // > 0 while compiling a class method body; this is only allowed there
     initializer: bool = false, // true while compiling the body of an init method
+    this_seeded: bool = false, // true while compiling a method body; nested functions capture `this` instead
     class_with_super: ?usize = null, // index of the enclosing class, when it has a superclass; super is only allowed there
 
     function_base: FunctionBase = .{
@@ -177,7 +178,10 @@ const Generator = struct {
                 var capture_top = compiled.function_base.capture_base;
                 for (compiled.function_base.capture_base..self.captures.items.len) |capture_index| {
                     const captured_variable = self.captures.items[capture_index];
-                    const variable = try self.getOrCaptureVariable(captured_variable, &capture_top);
+                    const variable = if (captured_variable == K_THIS)
+                        try self.getOrCaptureThis(&capture_top)
+                    else
+                        try self.getOrCaptureVariable(captured_variable, &capture_top);
                     try self.addIndexed(.capture, variable);
                 }
                 self.captures.shrinkRetainingCapacity(capture_top);
@@ -365,6 +369,10 @@ const Generator = struct {
         const old_initializer = self.initializer;
         self.initializer = is_initializer;
         defer self.initializer = old_initializer;
+
+        const old_this_seeded = self.this_seeded;
+        self.this_seeded = capture_seed != null;
+        defer self.this_seeded = old_this_seeded;
 
         const jump_op_index = try self.addForwardBranch(.branch_uncond);
 
@@ -576,8 +584,31 @@ const Generator = struct {
     }
 
     fn pushThis(self: *Self) !void {
+        try self.addIndexed(.variable, try self.getOrCaptureThis(&self.captures.items.len));
+    }
+
+    /// Frame height of `this` in the function currently being compiled. A method
+    /// body reads its seeded capture slot; nested functions capture it from the
+    /// enclosing method like any other enclosing variable.
+    fn getOrCaptureThis(self: *Self, capture_top_ptr: *usize) !usize {
         const local_frame_height = self.frame_variables.items.len - self.function_base.variable_base;
-        try self.addIndexed(.variable, local_frame_height + 1);
+
+        if (self.this_seeded)
+            return local_frame_height + 1;
+
+        const capture_top = capture_top_ptr.*;
+        for (self.function_base.capture_base..capture_top) |capture_index|
+            if (self.captures.items[capture_index] == K_THIS)
+                return capture_index + 1 - self.function_base.capture_base + local_frame_height;
+
+        if (capture_top == self.captures.items.len) {
+            try self.captures.append(self.allocator, K_THIS);
+        } else {
+            self.captures.items[capture_top] = K_THIS;
+            capture_top_ptr.* += 1;
+        }
+
+        return capture_top + 1 - self.function_base.capture_base + local_frame_height;
     }
 
     fn nextOpIndex(self: Self) usize {
