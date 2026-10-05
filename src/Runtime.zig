@@ -1,9 +1,25 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Writer = std.Io.Writer;
+const assert = std.debug.assert;
 
 const Bytecode = @import("Bytecode.zig");
 const Ast = @import("Ast.zig");
+
+const K_SUPER: usize = std.math.maxInt(usize); // marker member name separating a class body from its superclass's
+
+comptime {
+    // Payload contract: no variant may grow past a slice-sized word pair.
+    // (Safe build modes stack one hidden tag per nested untagged union.)
+    for (@typeInfo(HeapData).@"union".fields) |f| assertWithinSlice(f.type);
+}
+
+fn assertWithinSlice(comptime ty: type) void {
+    switch (@typeInfo(ty)) {
+        .@"union" => for (@typeInfo(ty).@"union".fields) |f| assertWithinSlice(f.type),
+        else => assert(@sizeOf(ty) <= 16),
+    }
+}
 
 pub const Value = union(enum) {
     nil: void,
@@ -348,6 +364,50 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
 
                 self.decrementRef(closure_object);
             },
+            .set_superclass => {
+                const class_value = self.pop(); // ownership held through the rewrite below
+
+                const superclass = self.pop();
+                errdefer self.free(superclass);
+
+                const superclass_object = switch (superclass) {
+                    .class => |object| object,
+                    else => return error.Runtime,
+                };
+
+                const member = try self.heap.create(self.allocator);
+                errdefer self.heap.destroy(member);
+                member.* = .{
+                    .tag = .member,
+                    .value_tag = .nil,
+                    .ref_count = 0,
+                    .data = .{ .member = .{
+                        .name_index = K_SUPER,
+                        .value = superclass_object,
+                    } },
+                };
+                superclass_object.ref_count += 1;
+
+                const link = try self.heap.create(self.allocator);
+                errdefer self.heap.destroy(link);
+                link.* = .{
+                    .tag = .member_list,
+                    .value_tag = .nil,
+                    .ref_count = 0,
+                    .data = .{ .member_list = .{
+                        .member = member,
+                        .next = superclass_object.data.class_body.methods,
+                    } },
+                };
+                member.ref_count += 1;
+                if (superclass_object.data.class_body.methods) |old_head|
+                    old_head.ref_count += 1;
+                class_value.class.data.class_body.methods = link;
+                link.ref_count += 1;
+
+                self.decrementRef(superclass_object);
+                try self.push(class_value);
+            },
 
             .not => {
                 const value = self.pop();
@@ -484,6 +544,13 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                         var methods_node = class_object.data.class_body.methods;
                         while (methods_node) |link| {
                             const member = link.data.member_list.member;
+
+                            if (member.data.member.name_index == K_SUPER) {
+                                // Superclass marker; holds a class, not a function.
+                                methods_node = link.data.member_list.next;
+                                continue;
+                            }
+
                             const function_index = member.data.member.value.data.function.function_index;
                             if (inst.bytecode.function_defs[function_index].is_initializer) {
                                 init_function = member.data.member.value;
@@ -569,6 +636,36 @@ pub fn run(self: *Self, start: Bytecode.Instruction) !void {
                         return error.Runtime;
                     }
                 }
+            },
+            .super_get => {
+                const object = self.pop();
+                defer self.free(object);
+
+                const instance = switch (object) {
+                    .instance => |instance| instance,
+                    else => return error.Runtime,
+                };
+
+                const super_ref = inst.superRef();
+
+                // Walk the chain to the class the method was defined in;
+                // each subclass's marker sits exactly methods_count cells from its head.
+                var class_object = instance.data.instance_body.class;
+                while (class_object.data.class_body.class_index != super_ref.class_index) {
+                    const marker = markerOf(inst.bytecode, class_object) orelse return error.Runtime;
+                    class_object = marker.data.member_list.member.data.member.value;
+                }
+
+                const marker = markerOf(inst.bytecode, class_object) orelse return error.Runtime;
+                var member_node = marker.data.member_list.next;
+                while (member_node) |link| {
+                    const member = link.data.member_list.member;
+                    if (member.data.member.name_index == super_ref.name_index) {
+                        try self.bindMethod(instance, member.data.member.value);
+                        break;
+                    }
+                    member_node = link.data.member_list.next;
+                } else return error.Runtime;
             },
             .set => {
                 const object = self.pop();
@@ -1085,6 +1182,18 @@ fn box(self: *Self, value: Value) error{OutOfMemory}!*HeapObject {
         .heap_string, .function, .instance, .class => |object| object,
         .jump_target => unreachable,
     };
+}
+
+/// The sentinel boundary cell of a class's method list, when it has a superclass;
+/// carries the superclass object in its member value.
+fn markerOf(bytecode: *const Bytecode, class_object: *HeapObject) ?*HeapObject {
+    var node = class_object.data.class_body.methods;
+    for (0..bytecode.class_defs[class_object.data.class_body.class_index].methods_count) |_| {
+        node = node.?.data.member_list.next;
+    }
+    if (node == null) return null;
+    if (node.?.data.member_list.member.data.member.name_index != K_SUPER) return null;
+    return node;
 }
 
 fn bindMethod(self: *Self, instance: *HeapObject, stored: *HeapObject) error{OutOfMemory}!void {
@@ -2131,4 +2240,265 @@ test "instance methods" {
         \\Cat
         \\
     );
+}
+
+test "inheritance" {
+    try testRun(
+        \\class Doughnut {}
+        \\class BostonCream < Doughnut {}
+        \\print Doughnut();
+        \\print BostonCream();
+    ,
+        \\Doughnut instance
+        \\BostonCream instance
+        \\
+    );
+    try testRun(
+        \\{
+        \\  class A {}
+        \\  class B < A {}
+        \\  class C < A {}
+        \\  print A();
+        \\  print B();
+        \\  print C();
+        \\}
+    ,
+        \\A instance
+        \\B instance
+        \\C instance
+        \\
+    );
+    try testRun(
+        \\class Root {
+        \\  getName() {
+        \\    print "Root class";
+        \\  }
+        \\}
+        \\class Parent < Root {
+        \\  parentMethod() {
+        \\    print "Method defined in Parent";
+        \\  }
+        \\}
+        \\class Child < Parent {
+        \\  childMethod() {
+        \\    print "Method defined in Child";
+        \\  }
+        \\}
+        \\var root = Root();
+        \\var parent = Parent();
+        \\var child = Child();
+        \\root.getName();
+        \\parent.getName();
+        \\child.getName();
+        \\parent.parentMethod();
+        \\child.parentMethod();
+        \\child.childMethod();
+    ,
+        \\Root class
+        \\Root class
+        \\Root class
+        \\Method defined in Parent
+        \\Method defined in Parent
+        \\Method defined in Child
+        \\
+    );
+    try testRun(
+        \\class A {
+        \\  method() {
+        \\    print "A method";
+        \\  }
+        \\}
+        \\class B < A {
+        \\  method() {
+        \\    print "B method";
+        \\  }
+        \\}
+        \\B().method();
+    ,
+        \\B method
+        \\
+    );
+    try testRun(
+        \\class Base {
+        \\  init(a) {
+        \\    this.a = a;
+        \\  }
+        \\}
+        \\class Derived < Base {
+        \\  init(a, b) {
+        \\    this.a = a;
+        \\    this.b = b;
+        \\  }
+        \\}
+        \\var derived = Derived(89, 32);
+        \\print derived.a;
+        \\print derived.b;
+    ,
+        \\89
+        \\32
+        \\
+    );
+    try testRun(
+        \\class Animal {
+        \\  speak() {
+        \\    return "Animal speaks";
+        \\  }
+        \\  makeSound() {
+        \\    return "Generic sound";
+        \\  }
+        \\  communicate() {
+        \\    return this.speak() + " : " + this.makeSound();
+        \\  }
+        \\}
+        \\class Dog < Animal {
+        \\  speak() {
+        \\    return "Dog speaks";
+        \\  }
+        \\  makeSound() {
+        \\    return "Woof";
+        \\  }
+        \\}
+        \\class Puppy < Dog {
+        \\  speak() {
+        \\    return "Puppy speaks";
+        \\  }
+        \\}
+        \\print Animal().communicate();
+        \\print Dog().communicate();
+        \\print Puppy().communicate();
+    ,
+        \\Animal speaks : Generic sound
+        \\Dog speaks : Woof
+        \\Puppy speaks : Woof
+        \\
+    );
+    // Sibling subclasses share the superclass tail; redeclaring a class
+    // declared in a function must not corrupt either chain.
+    try testRun(
+        \\fun make() {
+        \\  class Local {
+        \\    spot() {
+        \\      print "own spot";
+        \\    }
+        \\  }
+        \\  return Local;
+        \\}
+        \\var first = make();
+        \\var second = make();
+        \\first().spot();
+    ,
+        \\own spot
+        \\
+    );
+    try testRunError(
+        \\class A {}
+        \\class B < A {
+        \\  gone() {
+        \\    return super.gone;
+        \\  }
+        \\}
+        \\B().gone();
+    , error.Runtime);
+}
+
+test "super" {
+    try testRun(
+        \\class Doughnut {
+        \\  cook() {
+        \\    print "Fry until golden brown.";
+        \\  }
+        \\}
+        \\class BostonCream < Doughnut {
+        \\  cook() {
+        \\    super.cook();
+        \\  }
+        \\}
+        \\BostonCream().cook();
+    ,
+        \\Fry until golden brown.
+        \\
+    );
+    // super is resolved against the class the method was defined in, not the receiver:
+    // Child inherits Parent.method and must still reach Base.
+    try testRun(
+        \\class Base {
+        \\  method() {
+        \\    print "Base.method()";
+        \\  }
+        \\}
+        \\class Parent < Base {
+        \\  method() {
+        \\    super.method();
+        \\  }
+        \\}
+        \\class Child < Parent {
+        \\  method() {
+        \\    super.method();
+        \\  }
+        \\}
+        \\Parent().method();
+        \\Child().method();
+    ,
+        \\Base.method()
+        \\Base.method()
+        \\
+    );
+    // super.init chains explicitly; a bare adoption inherits the parent's initializer.
+    try testRun(
+        \\class Base {
+        \\  init(x) {
+        \\    this.x = x;
+        \\  }
+        \\}
+        \\class Derived < Base {
+        \\  init(x) {
+        \\    super.init(x + 1);
+        \\    this.x = this.x * 2;
+        \\  }
+        \\}
+        \\print Derived(3).x;
+        \\
+        \\class Adopter {}
+        \\var a = Adopter();
+        \\a.x = "kept";
+        \\print a.x;
+    ,
+        \\8
+        \\kept
+        \\
+    );
+    try testRun(
+        \\class Base {}
+        \\fun makeChild() {
+        \\  class Child < Base {
+        \\    shout() {
+        \\      print "shout";
+        \\    }
+        \\  }
+        \\  return Child;
+        \\}
+        \\var say = makeChild()().shout;
+        \\say();
+    ,
+        \\shout
+        \\
+    );
+    try testRunError(
+        \\class Base {}
+        \\class Child < Base {
+        \\  usage() {
+        \\    return super.x;
+        \\  }
+        \\}
+        \\Child().usage();
+    , error.Runtime);
+    try testRunError("class Foo { cook() { super.cook(); } }", error.Semantics);
+    try testRunError("fun outer() { super.x(); }", error.Semantics);
+    try testRunError("class A {}\nclass B < A { m() { super; } }", error.Syntax);
+    try testRunError("var A = \"n/a\";\nclass B < A {}\nprint B();", error.Runtime);
+    try testRunError("class Foo < Foo {}", error.Semantics);
+    try testRunError(
+        \\class Base {}
+        \\class Missing < Baseer {}
+    , error.Runtime);
 }

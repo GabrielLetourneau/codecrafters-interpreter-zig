@@ -26,6 +26,7 @@ pub const NodeTag = enum(u8) {
     variable,
     parameter,
     this,
+    super,
 
     // Bindings: one child, identifier data
     var_decl_init,
@@ -41,7 +42,7 @@ pub const NodeTag = enum(u8) {
     call,
     set,
     fun_def,
-    class_def, // lhs is .empty (method list head); rhs is last method, or .empty
+    class_def, // lhs is .empty or the superclass expression; rhs is last method, or .empty
     @"if",
     @"else",
     @"while",
@@ -120,6 +121,7 @@ pub const Node = struct {
             .number => try @import("number.zig").format(self.number(), writer),
             .string => try writer.writeAll(self.string()),
             .var_decl, .variable => try writer.print("({s} {d})", .{ self.tag().shortString(), self.identifier() }),
+            .super => try writer.print("(super {d})", .{self.identifier()}),
             .var_decl_init, .assignment => try writer.print("({s} {d} {f})", .{ self.tag().shortString(), self.identifier(), self.onlyChild() }),
             .method => try writer.print("(method {d} {f})", .{ self.identifier(), self.onlyChild() }),
             .declarations => try writer.print("{f}\n{f}", .{ self.leftChild(), self.rightChild() }),
@@ -161,7 +163,7 @@ pub const Node = struct {
 
     pub fn identifier(self: Self) usize {
         assert(switch (self.tag()) {
-            .var_decl, .variable, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get, .method => true,
+            .var_decl, .variable, .parameter, .var_decl_init, .assignment, .fun_decl, .class_decl, .get, .method, .super => true,
             else => false,
         });
 

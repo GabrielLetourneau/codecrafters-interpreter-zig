@@ -18,6 +18,7 @@ pub const OpCode = enum(u8) {
     clock,
     def_fun,
     def_class,
+    super_get,
     get,
     set,
 
@@ -38,6 +39,7 @@ pub const OpCode = enum(u8) {
     branch_cond_not,
     call,
     store_method,
+    set_superclass,
 
     // Binary operation; pops two values, pushes one
     multiply = 0x30,
@@ -76,6 +78,11 @@ pub const ClassDefinition = struct {
     methods_count: usize,
 };
 
+pub const SuperRef = struct {
+    name_index: usize,
+    class_index: usize,
+};
+
 ops: []const OpCode, // op codes, program starts at 0
 data: []const Data, // relevant data in same order as ops
 string_starts: []const usize, // pointer to start of string; end of string is following entry
@@ -84,6 +91,7 @@ function_defs: []const FunctionDefinition, // function definitions
 function_names: []const usize, // indexes of function name string starts
 class_defs: []const ClassDefinition, // class definitions
 class_methods: []const MethodDefinition, // class methods, laid out per class_defs ranges
+super_refs: []const SuperRef, // super method references, appended by super_get ops
 
 const Bytecode = @This();
 
@@ -92,6 +100,7 @@ pub fn deinit(self: Bytecode, allocator: std.mem.Allocator) void {
     allocator.free(self.function_defs);
     allocator.free(self.class_defs);
     allocator.free(self.class_methods);
+    allocator.free(self.super_refs);
     allocator.free(self.strings);
     allocator.free(self.string_starts);
     allocator.free(self.data);
@@ -129,7 +138,7 @@ pub const Instruction = struct {
                 const name_index = self.bytecode.class_defs[self.classIndex()].name_index;
                 try writer.print(" {s}", .{self.bytecode.stringAtIndex(name_index)});
             },
-            .get, .set => try writer.print(" {s}", .{self.string()}),
+            .get, .set, .super_get => try writer.print(" {s}", .{self.string()}),
             else => {},
         }
     }
@@ -174,6 +183,7 @@ pub const Instruction = struct {
     pub fn string(self: Self) []const u8 {
         const start_index = switch (self.op()) {
             .string, .get, .set => self.index(),
+            .super_get => self.superRef().name_index,
             .def_fun => self.bytecode.function_names[self.index()],
             else => unreachable,
         };
@@ -222,6 +232,12 @@ pub const Instruction = struct {
         assert(self.op() == .store_method);
 
         return self.index();
+    }
+
+    pub fn superRef(self: Self) SuperRef {
+        assert(self.op() == .super_get);
+
+        return self.bytecode.super_refs[self.index()];
     }
 
     pub fn finished(self: Self) bool {

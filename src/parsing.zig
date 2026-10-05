@@ -91,11 +91,17 @@ const Parser = struct {
             return error.Syntax;
         const identifier_index = try self.getStringStartIndex(identifier.lexeme);
 
+        if (self.match(.less)) |_| {
+            const superclass = self.match(.identifier) orelse
+                return error.Syntax;
+            const superclass_index = try self.getStringStartIndex(superclass.lexeme);
+            try self.addIndexed(.variable, superclass_index);
+        } else try self.addEmpty(.empty);
+
+        const head_index = self.lastNodeIndex();
+
         if (self.match(.left_brace) == null)
             return error.Syntax;
-
-        try self.addEmpty(.empty);
-        const head_index = self.lastNodeIndex();
 
         while (self.match(.right_brace) == null) {
             const methods_lhs_index = self.lastNodeIndex();
@@ -440,6 +446,13 @@ const Parser = struct {
         } else if (self.match(.string)) |token| {
             const string_start_index = try self.getStringStartIndex(token.literal.string);
             try self.addIndexed(.string, string_start_index);
+        } else if (self.match(.super)) |_| {
+            if (self.match(.dot) == null)
+                return error.Syntax;
+            const method = self.match(.identifier) orelse
+                return error.Syntax;
+            const method_name_index = try self.getStringStartIndex(method.lexeme);
+            try self.addIndexed(.super, method_name_index);
         } else if (self.match(.left_paren) != null) {
             try self.expression();
 

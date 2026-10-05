@@ -27,6 +27,7 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
         generator.captures.deinit(allocator);
         generator.frame_variables.deinit(allocator);
         generator.method_list.deinit(allocator);
+        generator.super_refs_list.deinit(allocator);
     }
     errdefer {
         generator.function_names_list.deinit(allocator);
@@ -59,6 +60,9 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
     const class_methods = try generator.method_list.toOwnedSlice(allocator);
     errdefer allocator.free(class_methods);
 
+    const super_refs = try generator.super_refs_list.toOwnedSlice(allocator);
+    errdefer allocator.free(super_refs);
+
     return .{
         .ops = ops,
         .data = data,
@@ -66,6 +70,7 @@ pub fn generate(allocator: Allocator, root: Ast.Node, run_mode: Ast.RootSymbol) 
         .function_names = function_names,
         .class_defs = class_defs,
         .class_methods = class_methods,
+        .super_refs = super_refs,
         .string_starts = root.ast.string_starts,
         .strings = root.ast.strings,
     };
@@ -81,6 +86,7 @@ const Generator = struct {
     function_names_list: std.ArrayListUnmanaged(usize) = .empty,
     class_defs_list: std.ArrayListUnmanaged(Bytecode.ClassDefinition) = .empty,
     method_list: std.ArrayListUnmanaged(Bytecode.MethodDefinition) = .empty,
+    super_refs_list: std.ArrayListUnmanaged(Bytecode.SuperRef) = .empty,
 
     frame_variables: std.ArrayListUnmanaged(usize) = .empty,
     captures: std.ArrayListUnmanaged(usize) = .empty,
@@ -93,6 +99,7 @@ const Generator = struct {
     function_depth: usize = 0, // > 0 while compiling a function body; return is only allowed there
     method_depth: usize = 0, // > 0 while compiling a class method body; this is only allowed there
     initializer: bool = false, // true while compiling the body of an init method
+    class_with_super: ?usize = null, // index of the enclosing class, when it has a superclass; super is only allowed there
 
     function_base: FunctionBase = .{
         .variable_base = 0,
@@ -184,7 +191,14 @@ const Generator = struct {
             .class_decl => {
                 const class_def_node = node.onlyChild();
 
-                const maybe_variable = try self.getOrPutVariable(node.identifier());
+                // Superclass first: its variable heights must be computed
+                // before the class name itself joins frame_variables.
+                const superclass_node = class_def_node.leftChild();
+                const has_superclass = superclass_node.tag() != .empty;
+
+                if (has_superclass and superclass_node.identifier() == node.identifier())
+                    return error.Semantics;
+                if (has_superclass) try self.expression(superclass_node);
 
                 const methods_start = self.method_list.items.len;
                 var methods_count: usize = 0;
@@ -202,12 +216,19 @@ const Generator = struct {
                 });
 
                 try self.addIndexed(.def_class, class_index);
+                if (has_superclass) try self.addEmpty(.set_superclass);
+
+                const maybe_variable = try self.getOrPutVariable(node.identifier());
                 if (maybe_variable) |variable| {
                     try self.addIndexed(.assign, variable);
                 } else {
                     try self.addEmpty(.alloc);
                     try self.addIndexed(.variable, 1);
                 }
+
+                const old_class_with_super = self.class_with_super;
+                self.class_with_super = if (has_superclass) class_index else null;
+                defer self.class_with_super = old_class_with_super;
 
                 var method_captures: std.ArrayListUnmanaged(usize) = .empty;
                 defer method_captures.deinit(self.allocator);
@@ -448,8 +469,20 @@ const Generator = struct {
             .this => {
                 if (self.method_depth == 0) return error.Semantics;
 
-                const local_frame_height = self.frame_variables.items.len - self.function_base.variable_base;
-                try self.addIndexed(.variable, local_frame_height + 1);
+                try self.pushThis();
+            },
+            .super => {
+                const enclosing_class_index = self.class_with_super orelse return error.Semantics;
+                if (self.method_depth == 0) return error.Semantics;
+
+                try self.pushThis();
+
+                const super_ref_index = self.super_refs_list.items.len;
+                try self.super_refs_list.append(self.allocator, .{
+                    .name_index = node.identifier(),
+                    .class_index = enclosing_class_index,
+                });
+                try self.addIndexed(.super_get, super_ref_index);
             },
             .variable => {
                 const identifier = node.identifier();
@@ -540,6 +573,11 @@ const Generator = struct {
         try self.expression(node.leftChild());
         try self.expression(node.rightChild());
         try self.addEmpty(op);
+    }
+
+    fn pushThis(self: *Self) !void {
+        const local_frame_height = self.frame_variables.items.len - self.function_base.variable_base;
+        try self.addIndexed(.variable, local_frame_height + 1);
     }
 
     fn nextOpIndex(self: Self) usize {
